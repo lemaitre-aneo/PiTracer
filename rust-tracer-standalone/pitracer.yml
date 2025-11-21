@@ -1,0 +1,51 @@
+recursion_depth: 30
+samples: 100
+camera:
+  origin: [50, 52, 295.6]
+  direction: [0, -0.042612, -1]
+  field_of_view: 40
+spheres:
+  # Top Light
+  - radius: 600
+    position: [50, 681.33, 81.6]
+    emission: [1, 1, 1]
+  # Walls
+  - radius: 100000
+    position: [100001, 40.8, 81.6]
+    color: [0.75, 0.25, 0.25]
+  - radius: 100000
+    position: [-99901, 40.8, 81.6]
+    color: [0.25, .075, 0.75]
+  - radius: 100000
+    position: [50, 40.8, 100000]
+    color: [0.75, 0.75, 0.75]
+  - radius: 100000
+    position: [50, 40.8, -99700]
+  - radius: 100000
+    position: [50, 100000, 81.6]
+    color: [0.75, 0.75, 0.75]
+  - radius: 100000
+    position: [50, -99918.4, 81.6]
+    color: [0.75, 0.75, 0.75]
+  # Balls
+  - radius: 16.5
+    position: [40, 16.5, 47]
+    color: [.999, .999, .999]
+    reflexivity: Specular
+  - radius: 16.5
+    position: [73, 46.5, 88]
+    color: [.999, .999, .999]
+    reflexivity: Refraction
+  - radius: 10
+    position: [15, 45, 112]
+    color: [.999, .999, .999]
+  - radius: 15
+    position: [16, 16, 130]
+    color: [.999, .999, .0]
+    reflexivity: Refraction
+  - radius: 10
+    position: [80, 12, 92]
+    color: [0, .999, 0]
+  - radius: 5
+    position: [50, 75, 81.6]
+    color: [0, .682, .999]

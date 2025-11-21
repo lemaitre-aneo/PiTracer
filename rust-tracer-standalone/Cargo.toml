@@ -1,0 +1,18 @@
+[package]
+name = "rust-tracer-standalone"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+raytracer = { path = "../rust-tracer-lib", package = "rust-tracer-lib" }
+sdl2 = "0.38"
+
+
+clap = { version = "4.5", features = ["derive"] }
+eyre = "0.6"
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+mimalloc = { version = "0.1", features = ["v3"] }
+rayon = "1.11.0"
+rand = "0.9"
+config = "0.15"

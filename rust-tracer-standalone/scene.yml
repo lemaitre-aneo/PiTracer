@@ -1,0 +1,32 @@
+recursion_depth: 30
+samples: 1000
+camera:
+  origin: [0, 0, -10]
+  direction: [0, 0, 1]
+  # field_of_view: 60
+  # width: 320
+  # height: 240
+  world_width: 1
+spheres:
+  # Top Light
+  - radius: 50
+    position: [0, 59.9, 9]
+    emission: [1, 1, 1]
+  # Walls
+  - radius: 100000
+    position: [-100010, 0, 0]
+    color: [0.75, 0, 0]
+  - radius: 100000
+    position: [100010, 0, 0]
+    color: [0.25, .075, 0.75]
+  - radius: 100000
+    position: [0, 0, 100010]
+    color: [0.75, 0.75, 0.75]
+  - radius: 100000
+    position: [0, 0, -100010]
+  - radius: 100000
+    position: [0, 100010, 0]
+    color: [0.75, 0.75, 0.75]
+  - radius: 100000
+    position: [0, -100010, 0]
+    color: [0.75, 0.75, 0.75]
