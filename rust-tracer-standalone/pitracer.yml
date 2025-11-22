@@ -1,5 +1,6 @@
 recursion_depth: 30
 samples: 100
+gamma: 3
 camera:
   origin: [50, 52, 295.6]
   direction: [0, -0.042612, -1]

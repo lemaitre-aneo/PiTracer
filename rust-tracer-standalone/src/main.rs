@@ -2,12 +2,12 @@ extern crate sdl2;
 
 use clap::Parser;
 use rand::SeedableRng;
-use raytracer::{Camera, CameraDefinition, Scene, Sphere, SphereVec, Vector};
+use raytracer::{Camera, CameraDefinition, Color, Scene, Sphere, SphereVec, Vector};
 use sdl2::event::EventSender;
 use sdl2::keyboard::Keycode;
-use sdl2::pixels::Color;
 use sdl2::{EventSubsystem, Sdl};
 use sdl2::{event::Event, surface::Surface};
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -35,18 +35,16 @@ pub struct Cli {
     pub samples: u32,
 
     /// Recursion depth
-    #[arg(short = 'd', long, default_value = "0")]
+    #[arg(short, long, default_value = "0")]
     pub depth: u32,
-}
 
-struct Pixel {
-    x: u32,
-    y: u32,
-    color: [u8; 3],
+    /// Gamma
+    #[arg(short, long, default_value = "0")]
+    pub gamma: f32,
 }
 
 struct MailBox {
-    pixels: Mutex<Vec<Pixel>>,
+    pixels: Mutex<Vec<u32>>,
     event_sender: EventSender,
 }
 
@@ -59,16 +57,16 @@ impl MailBox {
         }
     }
 
-    fn push(self: Arc<Self>, pixel: Pixel) {
+    fn push(self: Arc<Self>, row: u32) {
         let mut pixels = self.pixels.lock().unwrap();
-        pixels.push(pixel);
+        pixels.push(row);
 
         if pixels.len() == 1 {
             self.event_sender.push_custom_event(self.clone()).unwrap();
         }
     }
 
-    fn extract_pixels(&self) -> Vec<Pixel> {
+    fn extract_pixels(&self) -> Vec<u32> {
         std::mem::take(&mut self.pixels.lock().unwrap())
     }
 }
@@ -97,6 +95,11 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
         cli.depth = scene.recursion_depth;
     } else {
         scene.recursion_depth = cli.depth;
+    }
+    if cli.gamma == 0f32 {
+        cli.gamma = scene.gamma;
+    } else {
+        scene.gamma = cli.gamma;
     }
     let scene = scene.map_camera(From::from);
     tracing::error!("{scene:?}");
@@ -135,48 +138,76 @@ pub fn main() -> Result<(), eyre::Report> {
 
     let mut rng = rand::rngs::StdRng::from_os_rng();
 
-    for y in 0..cli.height {
-        for x in 0..cli.width {
-            let scene = scene.clone();
-            let mailbox = mailbox.clone();
-            let mut rng = rand::rngs::SmallRng::from_rng(&mut rng);
+    let total_size = cli.width as usize * cli.height as usize * 3;
+    let mut radiance = Vec::<AtomicU32>::with_capacity(total_size);
+    radiance.resize_with(total_size, Default::default);
+    let radiance = Arc::new(radiance);
 
-            rayon::spawn(move || {
-                let pixel = scene.pixel_radiance(x, cli.height - y - 1, &mut rng);
-                let color = [
-                    pixel.r.clamp(0f32, 1f32),
-                    pixel.g.clamp(0f32, 1f32),
-                    pixel.b.clamp(0f32, 1f32),
-                ]
-                .map(|l| (l.powf(1f32 / 2.2f32) * 255f32 + 0.5f32) as u8);
-
-                mailbox.push(Pixel { x, y, color });
-            });
-        }
-    }
-
-    let mut finished = false;
+    let mut iter = 0;
 
     loop {
-        if Arc::strong_count(&mailbox) == 1 && !finished {
-            tracing::error!("Finished!");
-            finished = true;
+        if Arc::strong_count(&mailbox) == 1 {
+            iter += 1;
+            tracing::error!("iteration {iter}");
+
+            for y in 0..cli.height {
+                let scene = scene.clone();
+                let mailbox = mailbox.clone();
+                let mut rng = rand::rngs::SmallRng::from_rng(&mut rng);
+                let radiance = radiance.clone();
+
+                rayon::spawn(move || {
+                    for x in 0..cli.width {
+                        let pixel = scene.pixel_radiance(x, cli.height - y - 1, &mut rng);
+                        let r = &radiance[(y as usize * cli.width as usize + x as usize) * 3];
+                        let g = &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 1];
+                        let b = &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 2];
+
+                        let old = Color {
+                            r: f32::from_bits(r.load(std::sync::atomic::Ordering::Relaxed)),
+                            g: f32::from_bits(g.load(std::sync::atomic::Ordering::Relaxed)),
+                            b: f32::from_bits(b.load(std::sync::atomic::Ordering::Relaxed)),
+                        };
+
+                        let pixel = (old * (iter - 1) as f32 + pixel) / iter as f32;
+
+                        r.store(pixel.r.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                        g.store(pixel.g.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                        b.store(pixel.b.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    mailbox.push(y);
+                });
+            }
         }
         let mut render = false;
         for event in event_pump.poll_iter() {
             if let Some(mailbox) = event.as_user_event_type::<Arc<MailBox>>() {
-                for Pixel { x, y, color } in mailbox.extract_pixels() {
-                    canvas.set_draw_color((color[0], color[1], color[2]));
-                    canvas
-                        .draw_point((x as i32, y as i32))
-                        .map_err(eyre::Report::msg)?;
-                    // unsafe {
-                    //     let surface = surface.raw();
-                    //     let pixels = (*surface).pixels as *mut [u8; 3];
-                    //     let pitch = (*surface).pitch;
-                    //     let pixel = pixels.byte_offset(y as isize * pitch as isize + x as isize);
-                    //     *pixel = color;
-                    // }
+                for y in mailbox.extract_pixels() {
+                    for x in 0..cli.width {
+                        let r = &radiance[(y as usize * cli.width as usize + x as usize) * 3];
+                        let g = &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 1];
+                        let b = &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 2];
+
+                        let color = Color {
+                            r: f32::from_bits(r.load(std::sync::atomic::Ordering::Relaxed)),
+                            g: f32::from_bits(g.load(std::sync::atomic::Ordering::Relaxed)),
+                            b: f32::from_bits(b.load(std::sync::atomic::Ordering::Relaxed)),
+                        };
+
+                        let color = scene.to_u8(color);
+                        canvas.set_draw_color((color[0], color[1], color[2]));
+                        canvas
+                            .draw_point((x as i32, y as i32))
+                            .map_err(eyre::Report::msg)?;
+                        // unsafe {
+                        //     let surface = surface.raw();
+                        //     let pixels = (*surface).pixels as *mut [u8; 3];
+                        //     let pitch = (*surface).pitch;
+                        //     let pixel = pixels.byte_offset(y as isize * pitch as isize + x as isize);
+                        //     *pixel = color;
+                        // }
+                    }
                 }
                 render = true;
                 continue;

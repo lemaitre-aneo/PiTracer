@@ -118,14 +118,14 @@ impl SphereRef<'_> {
         distance: f32,
         rng: &mut impl rand::Rng,
     ) -> Radiance {
+        let radius2 = self.radius * self.radius;
         let mut intersection_point = origin + distance * direction;
         let outward_normal = (intersection_point - self.position).normalized();
-        let front_face = outward_normal.dot(direction) < 0f32;
+        let front_face = (origin - self.position).norm2() >= radius2;
 
         // Due to numeric imprecisions, the intersection point might be within the sphere
         // In that case, force the intersection to be on the sphere
         let distance_to_center = (intersection_point - self.position).norm2();
-        let radius2 = self.radius * self.radius;
         let diff = distance_to_center - radius2;
         if (front_face && diff < 0f32) || (!front_face && diff > 0f32) {
             intersection_point = self.position + outward_normal * *self.radius;

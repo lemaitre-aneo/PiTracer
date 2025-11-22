@@ -4,13 +4,26 @@ use crate::camera::*;
 use crate::color::*;
 use crate::sphere::*;
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Scene<C = Camera> {
     pub camera: C,
     pub spheres: SphereVec,
     pub recursion_depth: u32,
     pub samples: u32,
+    pub gamma: f32,
+}
+
+impl<C: Default> Default for Scene<C> {
+    fn default() -> Self {
+        Self {
+            camera: Default::default(),
+            spheres: Default::default(),
+            recursion_depth: 10,
+            samples: 100,
+            gamma: 2.2,
+        }
+    }
 }
 
 impl<C> Scene<C> {
@@ -20,6 +33,7 @@ impl<C> Scene<C> {
             spheres: self.spheres,
             recursion_depth: self.recursion_depth,
             samples: self.samples,
+            gamma: self.gamma,
         }
     }
 }
@@ -71,5 +85,14 @@ impl Scene {
         }
 
         color / self.samples as f32
+    }
+
+    pub fn to_u8(&self, color: Color) -> [u8; 3] {
+        [
+            color.r.clamp(0f32, 1f32),
+            color.g.clamp(0f32, 1f32),
+            color.b.clamp(0f32, 1f32),
+        ]
+        .map(|l| (l.powf(1f32 / self.gamma) * 255f32 + 0.5f32) as u8)
     }
 }
