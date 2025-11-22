@@ -94,19 +94,21 @@ const EPS: f32 = 7e-2f32;
 
 impl SphereRef<'_> {
     pub fn intersect(self, origin: Vector, direction: UnitVector) -> f32 {
-        let f = origin - self.position;
-        let b = -f.dot(direction);
-        let r2 = self.radius * self.radius;
-        let z = f + b * direction;
+        let oc = self.position - origin;
+        let a = direction.norm2();
+        let h = direction.dot(oc);
+        let c = oc.norm2() - self.radius * self.radius;
 
-        let delta = r2 - z.norm2();
-        let q = b + b.signum() * delta.sqrt();
+        let delta = h * h - a * c;
+        let sqrtd = delta.sqrt();
 
-        let t0 = (f.norm2() - r2) / q;
-        let t1 = q;
-
-        let t = select_unpredictable(t0 > EPS, t0, t1);
-        select_unpredictable(delta > 0f32, t, 0f32)
+        if delta < 0f32 {
+            0f32
+        } else if h > sqrtd {
+            (h - sqrtd) / a
+        } else {
+            (h + sqrtd) / a
+        }
     }
 
     pub fn radiance(
@@ -116,13 +118,22 @@ impl SphereRef<'_> {
         distance: f32,
         rng: &mut impl rand::Rng,
     ) -> Radiance {
-        let intersection_point = origin + distance * direction;
-        let normal = (intersection_point - self.position).normalized();
-        let into = normal.dot(direction) < 0f32;
-        let normal_opposite_to_array = select_unpredictable(into, normal, -normal);
+        let mut intersection_point = origin + distance * direction;
+        let outward_normal = (intersection_point - self.position).normalized();
+        let front_face = outward_normal.dot(direction) < 0f32;
+
+        // Due to numeric imprecisions, the intersection point might be within the sphere
+        // In that case, force the intersection to be on the sphere
+        let distance_to_center = (intersection_point - self.position).norm2();
+        let radius2 = self.radius * self.radius;
+        let diff = distance_to_center - radius2;
+        if (front_face && diff < 0f32) || (!front_face && diff > 0f32) {
+            intersection_point = self.position + outward_normal * *self.radius;
+        }
+        let normal = select_unpredictable(front_face, outward_normal, -outward_normal);
 
         let emission = self.emission.to_owned();
-        let mut absorption = self.color.to_owned();
+        let absorption = self.color.to_owned();
 
         const AIR_REFRACTION_INDEX: f32 = 1.0f32;
         const GLASS_REFRACTION_INDEX: f32 = 1.5f32;
@@ -136,41 +147,26 @@ impl SphereRef<'_> {
         let reflected = direction.reflect(normal);
 
         let direction = match self.reflexivity {
-            Reflexivity::Diffuse => {
-                (normal_opposite_to_array + UnitVector::random(rng)).normalized()
-            }
+            Reflexivity::Diffuse => (normal + UnitVector::random(rng)).normalized(),
             Reflexivity::Specular => reflected,
             Reflexivity::Refraction => {
-                let refraction_factor = select_unpredictable(into, AIR_TO_GLASS, GLASS_TO_AIR);
-                let angle_of_attack = direction.dot(normal_opposite_to_array);
+                let refraction_factor =
+                    select_unpredictable(front_face, AIR_TO_GLASS, GLASS_TO_AIR);
 
-                let cos2t = 1f32
-                    - refraction_factor
-                        * refraction_factor
-                        * (1f32 - angle_of_attack * angle_of_attack);
+                let cost = direction.dot(-normal).min(1f32);
+                let sint = (1f32 - cost * cost).sqrt();
 
-                if cos2t < 0f32 {
+                let cannot_refract = refraction_factor * sint > 1f32;
+
+                let reflectance =
+                    BASE_REFLECTANCE + (1f32 - BASE_REFLECTANCE) * (1f32 - cost).powi(5);
+
+                if cannot_refract || reflectance > rng.random::<f32>() {
                     reflected
                 } else {
-                    let sign = select_unpredictable(into, 1f32, -1f32);
-                    let refracted = refraction_factor * direction
-                        - sign * (angle_of_attack * refraction_factor * cos2t.sqrt()) * normal;
-
-                    let reflectance_factor =
-                        1f32 - select_unpredictable(into, -angle_of_attack, refracted.dot(normal));
-                    let reflectance =
-                        BASE_REFLECTANCE + (1f32 - BASE_REFLECTANCE) * reflectance_factor.powi(5);
-                    let transmittance = 1f32 - reflectance;
-
-                    let reflexion_probability = 0.25f32 + 0.5f32 * reflectance;
-
-                    if rng.random::<f32>() < reflexion_probability {
-                        absorption *= reflectance / reflexion_probability;
-                        reflected
-                    } else {
-                        absorption *= transmittance / (1f32 - reflexion_probability);
-                        refracted.normalized()
-                    }
+                    let perp = refraction_factor * (direction + cost * normal);
+                    let parallel = -(1f32 - perp.norm2()).abs().sqrt() * normal;
+                    (perp + parallel).normalized()
                 }
             }
         };

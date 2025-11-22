@@ -135,8 +135,8 @@ pub fn main() -> Result<(), eyre::Report> {
 
     let mut rng = rand::rngs::StdRng::from_os_rng();
 
-    for x in 0..cli.width {
-        for y in 0..cli.height {
+    for y in 0..cli.height {
+        for x in 0..cli.width {
             let scene = scene.clone();
             let mailbox = mailbox.clone();
             let mut rng = rand::rngs::SmallRng::from_rng(&mut rng);
@@ -148,7 +148,7 @@ pub fn main() -> Result<(), eyre::Report> {
                     pixel.g.clamp(0f32, 1f32),
                     pixel.b.clamp(0f32, 1f32),
                 ]
-                .map(|l| (l.powf(1f32 / 2.5f32) * 255f32 + 0.5f32) as u8);
+                .map(|l| (l.powf(1f32 / 2.2f32) * 255f32 + 0.5f32) as u8);
 
                 mailbox.push(Pixel { x, y, color });
             });
