@@ -147,6 +147,7 @@ pub fn main() -> Result<(), eyre::Report> {
 
     let mut iter = 0;
     let mut paused = false;
+    let mut started = None;
 
     loop {
         let mut render = false;
@@ -210,48 +211,57 @@ pub fn main() -> Result<(), eyre::Report> {
             }
         }
 
-        if Arc::strong_count(&mailbox) == 1 && !paused {
-            iter += 1;
-            tracing::info!("iteration {iter}");
+        if Arc::strong_count(&mailbox) == 1 {
+            if let Some(started) = started.take() {
+                let finished = std::time::Instant::now();
+                tracing::info!("Iteration #{iter}: finished in {:#?}", finished - started);
+            }
+            if !paused {
+                iter += 1;
+                tracing::debug!("iteration #{iter}: started");
+                started = Some(std::time::Instant::now());
 
-            for y in 0..cli.height {
-                let scene = scene.clone();
-                let mailbox = mailbox.clone();
-                let mut rng = rand::rngs::SmallRng::from_rng(&mut rng);
-                let radiance = radiance.clone();
-                let image = image.clone();
+                for y in 0..cli.height {
+                    let scene = scene.clone();
+                    let mailbox = mailbox.clone();
+                    let mut rng = rand::rngs::SmallRng::from_rng(&mut rng);
+                    let radiance = radiance.clone();
+                    let image = image.clone();
 
-                rayon::spawn(move || {
-                    for x in 0..cli.width {
-                        let pixel = scene.pixel_radiance(x, cli.height - y - 1, &mut rng);
-                        let r = &radiance[(y as usize * cli.width as usize + x as usize) * 3];
-                        let g = &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 1];
-                        let b = &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 2];
+                    rayon::spawn(move || {
+                        for x in 0..cli.width {
+                            let pixel = scene.pixel_radiance(x, cli.height - y - 1, &mut rng);
+                            let r = &radiance[(y as usize * cli.width as usize + x as usize) * 3];
+                            let g =
+                                &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 1];
+                            let b =
+                                &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 2];
 
-                        let old = Color {
-                            r: f32::from_bits(r.load(std::sync::atomic::Ordering::Relaxed)),
-                            g: f32::from_bits(g.load(std::sync::atomic::Ordering::Relaxed)),
-                            b: f32::from_bits(b.load(std::sync::atomic::Ordering::Relaxed)),
-                        };
+                            let old = Color {
+                                r: f32::from_bits(r.load(std::sync::atomic::Ordering::Relaxed)),
+                                g: f32::from_bits(g.load(std::sync::atomic::Ordering::Relaxed)),
+                                b: f32::from_bits(b.load(std::sync::atomic::Ordering::Relaxed)),
+                            };
 
-                        let pixel = (old * (iter - 1) as f32 + pixel) / iter as f32;
+                            let pixel = (old * (iter - 1) as f32 + pixel) / iter as f32;
 
-                        r.store(pixel.r.to_bits(), std::sync::atomic::Ordering::Relaxed);
-                        g.store(pixel.g.to_bits(), std::sync::atomic::Ordering::Relaxed);
-                        b.store(pixel.b.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                            r.store(pixel.r.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                            g.store(pixel.g.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                            b.store(pixel.b.to_bits(), std::sync::atomic::Ordering::Relaxed);
 
-                        let color = scene.to_u8(pixel);
-                        let color = (255 << 24)
-                            | ((color[0] as u32) << 16)
-                            | ((color[1] as u32) << 8)
-                            | (color[2] as u32);
+                            let color = scene.to_u8(pixel);
+                            let color = (255 << 24)
+                                | ((color[0] as u32) << 16)
+                                | ((color[1] as u32) << 8)
+                                | (color[2] as u32);
 
-                        image[y as usize * cli.width as usize + x as usize]
-                            .store(color, std::sync::atomic::Ordering::Relaxed);
-                    }
+                            image[y as usize * cli.width as usize + x as usize]
+                                .store(color, std::sync::atomic::Ordering::Relaxed);
+                        }
 
-                    mailbox.signal();
-                });
+                        mailbox.signal();
+                    });
+                }
             }
         }
 
@@ -296,6 +306,6 @@ pub fn main() -> Result<(), eyre::Report> {
             canvas.present();
         }
 
-        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+        ::std::thread::sleep(Duration::from_secs_f64(1./30.));
     }
 }
