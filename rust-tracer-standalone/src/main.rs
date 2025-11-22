@@ -2,10 +2,11 @@ extern crate sdl2;
 
 use clap::Parser;
 use rand::SeedableRng;
-use raytracer::{Camera, CameraDefinition, Color, Scene, Sphere, SphereVec, Vector};
-use sdl2::event::EventSender;
+use raytracer::{CameraDefinition, Color, Scene};
+use sdl2::EventSubsystem;
+use sdl2::event::{EventSender, WindowEvent};
 use sdl2::keyboard::Keycode;
-use sdl2::{EventSubsystem, Sdl};
+use sdl2::rect::Rect;
 use sdl2::{event::Event, surface::Surface};
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
@@ -44,7 +45,7 @@ pub struct Cli {
 }
 
 struct MailBox {
-    pixels: Mutex<Vec<u32>>,
+    pixels: Mutex<bool>,
     event_sender: EventSender,
 }
 
@@ -57,17 +58,18 @@ impl MailBox {
         }
     }
 
-    fn push(self: Arc<Self>, row: u32) {
-        let mut pixels = self.pixels.lock().unwrap();
-        pixels.push(row);
+    fn signal(self: Arc<Self>) {
+        let mut pending = self.pixels.lock().unwrap();
 
-        if pixels.len() == 1 {
+        if !*pending {
             self.event_sender.push_custom_event(self.clone()).unwrap();
         }
+
+        *pending = true;
     }
 
-    fn extract_pixels(&self) -> Vec<u32> {
-        std::mem::take(&mut self.pixels.lock().unwrap())
+    fn acknowledge(&self) {
+        *self.pixels.lock().unwrap() = false;
     }
 }
 
@@ -102,7 +104,7 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
         scene.gamma = cli.gamma;
     }
     let scene = scene.map_camera(From::from);
-    tracing::error!("{scene:?}");
+    tracing::debug!("{scene:?}");
     Ok(scene)
 }
 
@@ -118,43 +120,106 @@ pub fn main() -> Result<(), eyre::Report> {
     let mut cli = Cli::parse();
     let scene = Arc::new(scene(&mut cli)?);
 
-    let sdl_context = sdl2::init().map_err(eyre::Report::msg)?;
-    let video_subsystem = sdl_context.video().map_err(eyre::Report::msg)?;
+    let sdl = sdl2::init().map_err(eyre::Report::msg)?;
+    let video_subsystem = sdl.video().map_err(eyre::Report::msg)?;
 
     let window = video_subsystem
-        .window("rust-sdl2 demo", cli.width, cli.height)
+        .window("Rust Tracer", cli.width, cli.height)
         .position_centered()
         .build()?;
 
     let mut canvas = window.into_canvas().build()?;
-    let mut surface = Surface::new(cli.width, cli.height, sdl2::pixels::PixelFormatEnum::RGB888)
-        .map_err(eyre::Report::msg)?;
-    let mailbox = Arc::new(MailBox::new(
-        &sdl_context.event().map_err(eyre::Report::msg)?,
-    ));
+    let texture_creator = canvas.texture_creator();
+    let mailbox = Arc::new(MailBox::new(&sdl.event().map_err(eyre::Report::msg)?));
 
     canvas.present();
-    let mut event_pump = sdl_context.event_pump().map_err(eyre::Report::msg)?;
+    let mut event_pump = sdl.event_pump().map_err(eyre::Report::msg)?;
 
     let mut rng = rand::rngs::StdRng::from_os_rng();
 
-    let total_size = cli.width as usize * cli.height as usize * 3;
-    let mut radiance = Vec::<AtomicU32>::with_capacity(total_size);
-    radiance.resize_with(total_size, Default::default);
+    let total_size = cli.width as usize * cli.height as usize;
+    let mut radiance = Vec::<AtomicU32>::with_capacity(total_size * 3);
+    radiance.resize_with(total_size * 3, Default::default);
     let radiance = Arc::new(radiance);
+    let mut image = Vec::<AtomicU32>::with_capacity(total_size);
+    image.resize_with(total_size, Default::default);
+    let image = Arc::new(image);
 
     let mut iter = 0;
+    let mut paused = false;
 
     loop {
-        if Arc::strong_count(&mailbox) == 1 {
+        let mut render = false;
+        let mut clear = false;
+        for event in event_pump.poll_iter() {
+            if let Some(mailbox) = event.as_user_event_type::<Arc<MailBox>>() {
+                mailbox.acknowledge();
+                render = true;
+                continue;
+            }
+            match event {
+                Event::Window {
+                    win_event:
+                        WindowEvent::Maximized
+                        | WindowEvent::Minimized
+                        | WindowEvent::Resized(..)
+                        | WindowEvent::SizeChanged(..)
+                        | WindowEvent::Restored,
+                    ..
+                } => {
+                    clear = true;
+                    render = true;
+                }
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => return Ok(()),
+                Event::KeyDown {
+                    keycode: Some(Keycode::Space),
+                    ..
+                } => {
+                    paused = !paused;
+                    let title = if paused {
+                        tracing::info!("Paused");
+                        "Rust Tracer (paused)"
+                    } else {
+                        tracing::info!("Resumed");
+                        "Rust Tracer"
+                    };
+                    canvas
+                        .window_mut()
+                        .set_title(title)
+                        .map_err(eyre::Report::msg)?;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::F11),
+                    ..
+                } => {
+                    let window = canvas.window_mut();
+
+                    let state = match window.fullscreen_state() {
+                        sdl2::video::FullscreenType::Off => sdl2::video::FullscreenType::True,
+                        _ => sdl2::video::FullscreenType::Off,
+                    };
+                    window.set_fullscreen(state).map_err(eyre::Report::msg)?;
+                    clear = true;
+                    render = true;
+                }
+                _ => {}
+            }
+        }
+
+        if Arc::strong_count(&mailbox) == 1 && !paused {
             iter += 1;
-            tracing::error!("iteration {iter}");
+            tracing::info!("iteration {iter}");
 
             for y in 0..cli.height {
                 let scene = scene.clone();
                 let mailbox = mailbox.clone();
                 let mut rng = rand::rngs::SmallRng::from_rng(&mut rng);
                 let radiance = radiance.clone();
+                let image = image.clone();
 
                 rayon::spawn(move || {
                     for x in 0..cli.width {
@@ -174,72 +239,62 @@ pub fn main() -> Result<(), eyre::Report> {
                         r.store(pixel.r.to_bits(), std::sync::atomic::Ordering::Relaxed);
                         g.store(pixel.g.to_bits(), std::sync::atomic::Ordering::Relaxed);
                         b.store(pixel.b.to_bits(), std::sync::atomic::Ordering::Relaxed);
+
+                        let color = scene.to_u8(pixel);
+                        let color = (255 << 24)
+                            | ((color[0] as u32) << 16)
+                            | ((color[1] as u32) << 8)
+                            | (color[2] as u32);
+
+                        image[y as usize * cli.width as usize + x as usize]
+                            .store(color, std::sync::atomic::Ordering::Relaxed);
                     }
 
-                    mailbox.push(y);
+                    mailbox.signal();
                 });
             }
         }
-        let mut render = false;
-        for event in event_pump.poll_iter() {
-            if let Some(mailbox) = event.as_user_event_type::<Arc<MailBox>>() {
-                for y in mailbox.extract_pixels() {
-                    for x in 0..cli.width {
-                        let r = &radiance[(y as usize * cli.width as usize + x as usize) * 3];
-                        let g = &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 1];
-                        let b = &radiance[(y as usize * cli.width as usize + x as usize) * 3 + 2];
 
-                        let color = Color {
-                            r: f32::from_bits(r.load(std::sync::atomic::Ordering::Relaxed)),
-                            g: f32::from_bits(g.load(std::sync::atomic::Ordering::Relaxed)),
-                            b: f32::from_bits(b.load(std::sync::atomic::Ordering::Relaxed)),
-                        };
+        if render {
+            let data = unsafe {
+                std::slice::from_raw_parts_mut(image.as_slice().as_ptr() as *mut u8, total_size * 4)
+            };
+            let surface = Surface::from_data(
+                data,
+                cli.width,
+                cli.height,
+                cli.width * 4,
+                sdl2::pixels::PixelFormatEnum::ARGB8888,
+            )
+            .map_err(eyre::Report::msg)?;
+            let texture = surface
+                .as_texture(&texture_creator)
+                .map_err(eyre::Report::msg)?;
 
-                        let color = scene.to_u8(color);
-                        canvas.set_draw_color((color[0], color[1], color[2]));
-                        canvas
-                            .draw_point((x as i32, y as i32))
-                            .map_err(eyre::Report::msg)?;
-                        // unsafe {
-                        //     let surface = surface.raw();
-                        //     let pixels = (*surface).pixels as *mut [u8; 3];
-                        //     let pitch = (*surface).pitch;
-                        //     let pixel = pixels.byte_offset(y as isize * pitch as isize + x as isize);
-                        //     *pixel = color;
-                        // }
-                    }
+            let (w, h) = canvas.output_size().unwrap();
+            let target = match (cli.width * h).cmp(&(w * cli.height)) {
+                std::cmp::Ordering::Greater => {
+                    let sh = cli.height * w / cli.width;
+                    let y = (h - sh) / 2;
+                    Some(Rect::new(0, y as i32, w, sh))
                 }
-                render = true;
-                continue;
+                std::cmp::Ordering::Less => {
+                    let sw = cli.width * h / cli.height;
+                    let x = (w - sw) / 2;
+                    Some(Rect::new(x as i32, 0, sw, h))
+                }
+                std::cmp::Ordering::Equal => None,
+            };
+
+            if clear {
+                canvas.clear();
             }
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => return Ok(()),
-                Event::KeyDown {
-                    keycode: Some(Keycode::F11),
-                    ..
-                } => {
-                    let window = canvas.window_mut();
 
-                    let state = match window.fullscreen_state() {
-                        sdl2::video::FullscreenType::Off => sdl2::video::FullscreenType::True,
-                        _ => sdl2::video::FullscreenType::Off,
-                    };
-                    window.set_fullscreen(state).map_err(eyre::Report::msg)?;
-                    render = true;
-                }
-                _ => {
-                    // tracing::error!("{event:?}");
-                }
-            }
+            canvas
+                .copy(&texture, None, target)
+                .map_err(eyre::Report::msg)?;
+            canvas.present();
         }
-
-        // The rest of the game loop goes here...
-
-        canvas.present();
 
         ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
