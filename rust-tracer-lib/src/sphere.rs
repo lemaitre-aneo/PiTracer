@@ -1,4 +1,4 @@
-use std::hint::select_unpredictable;
+use crate::select;
 
 use serde::{Deserialize, Serialize, de::Visitor};
 use soa_derive::StructOfArray;
@@ -130,7 +130,7 @@ impl SphereRef<'_> {
         if (front_face && diff < 0f32) || (!front_face && diff > 0f32) {
             intersection_point = self.position + outward_normal * *self.radius;
         }
-        let normal = select_unpredictable(front_face, outward_normal, -outward_normal);
+        let normal = select(front_face, outward_normal, -outward_normal);
 
         let emission = self.emission.to_owned();
         let absorption = self.color.to_owned();
@@ -151,7 +151,7 @@ impl SphereRef<'_> {
             Reflexivity::Specular => reflected,
             Reflexivity::Refraction => {
                 let refraction_factor =
-                    select_unpredictable(front_face, AIR_TO_GLASS, GLASS_TO_AIR);
+                    select(front_face, AIR_TO_GLASS, GLASS_TO_AIR);
 
                 let cost = direction.dot(-normal).min(1f32);
                 let sint = (1f32 - cost * cost).sqrt();
@@ -188,8 +188,8 @@ impl<'a> SphereSlice<'a> {
         for (i, sphere) in self.iter().enumerate() {
             let t = sphere.intersect(origin, direction);
             let better = t > EPS && t < closest;
-            closest = select_unpredictable(better, t, closest);
-            found = select_unpredictable(better, i, found);
+            closest = select(better, t, closest);
+            found = select(better, i, found);
         }
 
         self.split_at(found.min(self.len()))

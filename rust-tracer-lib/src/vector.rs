@@ -276,7 +276,9 @@ impl Vector {
         self.norm2().sqrt()
     }
     pub fn normalized(self) -> UnitVector {
-        UnitVector(self / self.norm())
+        let sum = self.dot(self);
+        let normalization = 1f32 / sum.sqrt();
+        UnitVector(self * normalization)
     }
     pub fn reflect(self, normal: UnitVector) -> Vector {
         let an = 2f32 * (self * normal).sum();
@@ -363,7 +365,7 @@ impl UnitVector {
     }
     pub fn random_hemisphere(normal: UnitVector, rng: &mut impl rand::Rng) -> UnitVector {
         let vec = Self::random(rng);
-        std::hint::select_unpredictable(vec.dot(normal) > 0f32, vec, -vec)
+        crate::select(vec.dot(normal) > 0f32, vec, -vec)
     }
 }
 
