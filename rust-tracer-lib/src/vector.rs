@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize, de::Visitor};
-use soa_derive::StructOfArray;
 
-#[derive(StructOfArray, Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize)]
-#[soa_derive(Debug, Default, Clone, PartialEq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize)]
 #[serde(default)]
-pub struct Vector {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
+pub struct Vector<T = f32> {
+    pub x: T,
+    pub y: T,
+    pub z: T,
 }
+
+pub type VectorVec = Vec<Vector>;
 
 impl<'de> Deserialize<'de> for Vector {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -57,97 +57,24 @@ impl<'de> Deserialize<'de> for Vector {
     }
 }
 
-impl<'de> Deserialize<'de> for VectorVec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct FieldVisitor;
-
-        impl<'de> Visitor<'de> for FieldVisitor {
-            type Value = VectorVec;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("either [{x: f32, y: f32, z: f32}], [(f32, f32, f32)], or {x: [f32], y: [f32], z: [f32]}")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut vectors = Vec::new();
-
-                while let Some(vec) = seq.next_element()? {
-                    vectors.push(vec);
-                }
-
-                Ok(vectors.into_iter().collect())
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::MapAccess<'de>,
-            {
-                let mut vec = VectorVec::default();
-
-                while let Some((key, value)) = map.next_entry::<String, Vec<f32>>()? {
-                    match key.as_str() {
-                        "x" => vec.x = value,
-                        "y" => vec.y = value,
-                        "z" => vec.z = value,
-                        _ => Err(serde::de::Error::custom("Expected either `x`, `y`, `z`"))?,
-                    }
-                }
-                Ok(vec)
-            }
-        }
-
-        deserializer.deserialize_any(FieldVisitor)
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(default)]
-pub struct UnitVector(Vector);
+#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]
+pub struct UnitVector<T = f32>(Vector<T>);
 
 macro_rules! impl_op {
     ($op:ident($opassign:ident): $trait:ident($traitassign:ident): $assign:tt) => {
         impl_op!($opassign(Vector, f32): $traitassign: $assign);
         impl_op!($opassign(Vector, Vector): $traitassign: $assign {.});
         impl_op!($opassign(Vector, UnitVector): $traitassign: $assign {.0.});
-        impl_op!($opassign(Vector, VectorRef<'_>): $traitassign: $assign {.});
-        impl_op!($opassign(Vector, {*} VectorRefMut<'_>): $traitassign: $assign {.});
-        impl_op!($opassign({*} VectorRefMut<'_>, f32): $traitassign: $assign);
-        impl_op!($opassign({*} VectorRefMut<'_>, Vector): $traitassign: $assign {.});
-        impl_op!($opassign({*} VectorRefMut<'_>, UnitVector): $traitassign: $assign {.0.});
-        impl_op!($opassign({*} VectorRefMut<'_>, VectorRef<'_>): $traitassign: $assign {.});
-        impl_op!($opassign({*} VectorRefMut<'_>, {*} VectorRefMut<'_>): $traitassign: $assign {.});
 
 
         impl_op!($op(Vector, f32) -> Vector: $trait: $assign);
         impl_op!($op(Vector, Vector) -> Vector: $trait: $assign);
         impl_op!($op(Vector, UnitVector) -> Vector: $trait: $assign);
-        impl_op!($op(Vector, VectorRef<'_>) -> Vector: $trait: $assign);
-        impl_op!($op(Vector, VectorRefMut<'_>) -> Vector: $trait: $assign);
         impl_op!($op(UnitVector, f32) -> Vector: $trait: $assign);
         impl_op!($op(UnitVector, Vector) -> Vector: $trait: $assign);
         impl_op!($op(UnitVector, UnitVector) -> Vector: $trait: $assign);
-        impl_op!($op(UnitVector, VectorRef<'_>) -> Vector: $trait: $assign);
-        impl_op!($op(UnitVector, VectorRefMut<'_>) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRef<'_>, f32) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRef<'_>, Vector) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRef<'_>, UnitVector) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRef<'_>, VectorRef<'_>) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRef<'_>, VectorRefMut<'_>) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRefMut<'_>, f32) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRefMut<'_>, Vector) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRefMut<'_>, UnitVector) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRefMut<'_>, VectorRef<'_>) -> Vector: $trait: $assign);
-        impl_op!($op(VectorRefMut<'_>, VectorRefMut<'_>) -> Vector: $trait: $assign);
         impl_op!($op(f32, Vector) -> Vector: $trait: $assign);
         impl_op!($op(f32, UnitVector) -> Vector: $trait: $assign);
-        impl_op!($op(f32, VectorRef<'_>) -> Vector: $trait: $assign);
-        impl_op!($op(f32, VectorRefMut<'_>) -> Vector: $trait: $assign);
     };
 
     ($op:ident($({$dereflhs:tt})? $lhs:ty, $({$derefrhs:tt})? $rhs:ty): $trait:ident : $assign:tt $({$($member:tt)*})?) => {
@@ -187,13 +114,6 @@ impl std::ops::Neg for Vector {
             y: -self.y,
             z: -self.z,
         }
-    }
-}
-impl std::ops::Neg for VectorRef<'_> {
-    type Output = Vector;
-
-    fn neg(self) -> Self::Output {
-        -self.to_owned()
     }
 }
 impl std::ops::Neg for UnitVector {
@@ -294,48 +214,6 @@ impl Vector {
     }
 }
 
-impl VectorRef<'_> {
-    pub fn sum(self) -> f32 {
-        self.to_owned().sum()
-    }
-    pub fn norm2(self) -> f32 {
-        self.to_owned().norm2()
-    }
-    pub fn norm(self) -> f32 {
-        self.to_owned().norm()
-    }
-    pub fn normalized(self) -> UnitVector {
-        self.to_owned().normalized()
-    }
-    pub fn reflect(self, normal: UnitVector) -> Vector {
-        self.to_owned().reflect(normal)
-    }
-    pub fn cross(self, rhs: impl Into<Vector>) -> Vector {
-        self.to_owned().cross(rhs)
-    }
-}
-
-impl VectorRefMut<'_> {
-    pub fn sum(&self) -> f32 {
-        self.to_owned().sum()
-    }
-    pub fn norm2(&self) -> f32 {
-        self.to_owned().norm2()
-    }
-    pub fn norm(&self) -> f32 {
-        self.to_owned().norm()
-    }
-    pub fn normalized(&self) -> UnitVector {
-        self.to_owned().normalized()
-    }
-    pub fn reflect(&self, normal: UnitVector) -> Vector {
-        self.to_owned().reflect(normal)
-    }
-    pub fn cross(self, rhs: impl Into<Vector>) -> Vector {
-        self.to_owned().cross(rhs)
-    }
-}
-
 impl UnitVector {
     pub fn norm(self) -> f32 {
         1f32
@@ -388,20 +266,6 @@ impl Dot<UnitVector> for Vector {
         (self * rhs).sum()
     }
 }
-impl Dot<VectorRef<'_>> for Vector {
-    type Output = f32;
-
-    fn dot(self, rhs: VectorRef<'_>) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
-impl Dot<VectorRefMut<'_>> for Vector {
-    type Output = f32;
-
-    fn dot(self, rhs: VectorRefMut<'_>) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
 
 impl Dot<Vector> for UnitVector {
     type Output = f32;
@@ -415,77 +279,5 @@ impl Dot<UnitVector> for UnitVector {
 
     fn dot(self, rhs: UnitVector) -> Self::Output {
         (self * rhs).sum()
-    }
-}
-impl Dot<VectorRef<'_>> for UnitVector {
-    type Output = f32;
-
-    fn dot(self, rhs: VectorRef<'_>) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
-impl Dot<&VectorRefMut<'_>> for UnitVector {
-    type Output = f32;
-
-    fn dot(self, rhs: &VectorRefMut<'_>) -> Self::Output {
-        (self * rhs.to_owned()).sum()
-    }
-}
-
-impl Dot<Vector> for VectorRef<'_> {
-    type Output = f32;
-
-    fn dot(self, rhs: Vector) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
-impl Dot<UnitVector> for VectorRef<'_> {
-    type Output = f32;
-
-    fn dot(self, rhs: UnitVector) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
-impl Dot<VectorRef<'_>> for VectorRef<'_> {
-    type Output = f32;
-
-    fn dot(self, rhs: VectorRef<'_>) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
-impl Dot<&VectorRefMut<'_>> for VectorRef<'_> {
-    type Output = f32;
-
-    fn dot(self, rhs: &VectorRefMut<'_>) -> Self::Output {
-        (self * rhs.to_owned()).sum()
-    }
-}
-
-impl Dot<Vector> for &VectorRefMut<'_> {
-    type Output = f32;
-
-    fn dot(self, rhs: Vector) -> Self::Output {
-        (self.to_owned() * rhs).sum()
-    }
-}
-impl Dot<UnitVector> for &VectorRefMut<'_> {
-    type Output = f32;
-
-    fn dot(self, rhs: UnitVector) -> Self::Output {
-        (self.to_owned() * rhs).sum()
-    }
-}
-impl Dot<VectorRef<'_>> for &VectorRefMut<'_> {
-    type Output = f32;
-
-    fn dot(self, rhs: VectorRef<'_>) -> Self::Output {
-        (self.to_owned() * rhs).sum()
-    }
-}
-impl Dot<&VectorRefMut<'_>> for &VectorRefMut<'_> {
-    type Output = f32;
-
-    fn dot(self, rhs: &VectorRefMut<'_>) -> Self::Output {
-        (self.to_owned() * rhs.to_owned()).sum()
     }
 }

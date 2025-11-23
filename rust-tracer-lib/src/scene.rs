@@ -46,7 +46,7 @@ impl Scene {
         let mut colors = Vec::with_capacity(self.recursion_depth as usize);
 
         loop {
-            let Some((sphere, distance)) = self.spheres.as_slice().intersect(origin, direction)
+            let Some((sphere, distance)) = Sphere::intersect_many(&self.spheres, origin, direction)
             else {
                 break;
             };
