@@ -3,7 +3,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32},
     },
-    time::Duration,
 };
 
 use rand::{RngCore, SeedableRng};
@@ -14,39 +13,91 @@ pub struct Raytracer {
     pub scene: Scene,
     pending: Mutex<bool>,
     event_sender: EventSender,
-    radiance: Vec<AtomicU32>,
-    pixels: Vec<AtomicU32>,
+    radiance: *mut f32,
+    pixels: *mut u8,
     stopping: AtomicBool,
     iter: AtomicU32,
 }
 
+unsafe impl Send for Raytracer {}
+unsafe impl Sync for Raytracer {}
+
+impl Drop for Raytracer {
+    fn drop(&mut self) {
+        let layout = self.layout();
+        let total_size = layout.height * layout.pitch;
+
+        unsafe {
+            std::alloc::dealloc(
+                self.radiance as *mut u8,
+                std::alloc::Layout::from_size_align(total_size * 4, 16).unwrap_unchecked(),
+            );
+            std::alloc::dealloc(
+                self.pixels,
+                std::alloc::Layout::from_size_align(total_size, 16).unwrap_unchecked(),
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    height: usize,
+    width: usize,
+    pitch: usize,
+}
+
 impl Raytracer {
+    fn layout_from_scene(scene: &Scene) -> Layout {
+        let width = scene.camera.width as usize;
+        let height = scene.camera.height as usize;
+        let pitch = (width * 3).next_multiple_of(16);
+
+        Layout {
+            height,
+            width,
+            pitch,
+        }
+    }
+
+    fn layout(&self) -> Layout {
+        Self::layout_from_scene(&self.scene)
+    }
+
     pub fn new(scene: Scene, sdl: &Sdl) -> Result<Arc<Self>, String> {
         let events = sdl.event()?;
         events.register_custom_event::<Arc<Raytracer>>()?;
-        let total_size = scene.camera.width as usize * scene.camera.height as usize;
-        let mut radiance = Vec::with_capacity(total_size * 3);
-        radiance.resize_with(total_size * 3, Default::default);
-        let mut pixels = Vec::with_capacity(total_size);
-        pixels.resize_with(total_size, Default::default);
+
+        let layout = Self::layout_from_scene(&scene);
+        let total_size = layout.height * layout.pitch;
 
         Ok(Arc::new(Self {
             scene,
             pending: Mutex::new(false),
             event_sender: events.event_sender(),
-            radiance,
-            pixels,
+            radiance: unsafe {
+                std::alloc::alloc(
+                    std::alloc::Layout::from_size_align(
+                        total_size * std::mem::size_of::<f32>(),
+                        16,
+                    )
+                    .unwrap_unchecked(),
+                ) as *mut f32
+            },
+            pixels: unsafe {
+                std::alloc::alloc(
+                    std::alloc::Layout::from_size_align(
+                        total_size * std::mem::size_of::<u8>(),
+                        16,
+                    )
+                    .unwrap_unchecked(),
+                )
+            },
             stopping: AtomicBool::new(false),
             iter: AtomicU32::new(0),
         }))
     }
 
-    pub fn width(&self) -> u32 {
-        self.scene.camera.width
-    }
-    pub fn height(&self) -> u32 {
-        self.scene.camera.height
-    }
     pub fn iter(&self) -> u32 {
         self.iter.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -66,62 +117,59 @@ impl Raytracer {
     }
 
     pub fn get_surface(&self) -> Result<Surface<'_>, String> {
-        let data = unsafe {
-            std::slice::from_raw_parts_mut(
-                self.pixels.as_slice().as_ptr() as *mut u8,
-                self.width() as usize * self.height() as usize * 4,
-            )
-        };
+        let layout = self.layout();
+
         Surface::from_data(
-            data,
-            self.width(),
-            self.height(),
-            self.width() * 4,
-            sdl2::pixels::PixelFormatEnum::ARGB8888,
+            unsafe { std::slice::from_raw_parts_mut(self.pixels, layout.height * layout.pitch) },
+            layout.width as u32,
+            layout.height as u32,
+            layout.pitch as u32,
+            sdl2::pixels::PixelFormatEnum::RGB24,
         )
     }
 
     pub fn send_process(self: Arc<Self>, mut rng: &mut dyn RngCore) {
+        let layout = self.layout();
         let iter = self.iter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
-        for y in 0..self.height() {
+        for y in 0..layout.height {
             let mut rng = rand::rngs::SmallRng::from_rng(&mut rng);
             let this = self.clone();
 
             rayon::spawn(move || {
-                for x in 0..this.width() {
-                    if this.stopping.load(std::sync::atomic::Ordering::Acquire) {
+                for x in 0..layout.width {
+                    if this.stopping() {
                         return;
                     }
-                    let pixel = this
-                        .scene
-                        .pixel_radiance(x, this.height() - y - 1, &mut rng);
-                    let r = &this.radiance[(y as usize * this.width() as usize + x as usize) * 3];
-                    let g =
-                        &this.radiance[(y as usize * this.width() as usize + x as usize) * 3 + 1];
-                    let b =
-                        &this.radiance[(y as usize * this.width() as usize + x as usize) * 3 + 2];
+                    let pixel = this.scene.pixel_radiance(
+                        x as u32,
+                        (layout.height - y - 1) as u32,
+                        &mut rng,
+                    );
+                    unsafe {
+                        let r = this.radiance.add(y * layout.pitch + x * 3);
+                        let g = this.radiance.add(y * layout.pitch + x * 3 + 1);
+                        let b = this.radiance.add(y * layout.pitch + x * 3 + 2);
 
-                    let old = Color {
-                        r: f32::from_bits(r.load(std::sync::atomic::Ordering::Relaxed)),
-                        g: f32::from_bits(g.load(std::sync::atomic::Ordering::Relaxed)),
-                        b: f32::from_bits(b.load(std::sync::atomic::Ordering::Relaxed)),
-                    };
+                        let old = Color {
+                            r: *r,
+                            g: *g,
+                            b: *b,
+                        };
 
-                    let pixel = (old * (iter - 1) as f32 + pixel) / iter as f32;
+                        let pixel = (old * (iter - 1) as f32 + pixel) / iter as f32;
 
-                    r.store(pixel.r.to_bits(), std::sync::atomic::Ordering::Relaxed);
-                    g.store(pixel.g.to_bits(), std::sync::atomic::Ordering::Relaxed);
-                    b.store(pixel.b.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                        *r = pixel.r;
+                        *g = pixel.g;
+                        *b = pixel.b;
+                    }
+                }
 
-                    let color = this.scene.to_u8(pixel);
-                    let color = (255 << 24)
-                        | ((color[0] as u32) << 16)
-                        | ((color[1] as u32) << 8)
-                        | (color[2] as u32);
-
-                    this.pixels[y as usize * this.width() as usize + x as usize]
-                        .store(color, std::sync::atomic::Ordering::Relaxed);
+                for x in 0..(layout.width * 3) {
+                    unsafe {
+                        let value = *this.radiance.add(y * layout.pitch + x);
+                        *this.pixels.add(y * layout.pitch + x) = this.scene.to_u8(value);
+                    }
                 }
 
                 this.signal();
@@ -132,10 +180,10 @@ impl Raytracer {
     pub fn stop(self: &Arc<Self>) {
         self.stopping
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
-        // Wait for all processing tasks to finish their rendering
-        while Arc::strong_count(self) > 1 {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    pub fn stopping(&self) -> bool {
+        self.stopping
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }

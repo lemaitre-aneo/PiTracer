@@ -180,6 +180,9 @@ pub fn main() -> Result<(), eyre::Report> {
         }
 
         if Arc::strong_count(&raytracer) == 1 {
+            if raytracer.stopping() {
+                break;
+            }
             if let Some(started) = started.take() {
                 let finished = std::time::Instant::now();
                 tracing::info!(
@@ -226,4 +229,6 @@ pub fn main() -> Result<(), eyre::Report> {
 
         std::thread::sleep(Duration::from_secs_f64(1. / 30.));
     }
+
+    Ok(())
 }

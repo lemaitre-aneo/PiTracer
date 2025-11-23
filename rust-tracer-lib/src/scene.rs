@@ -87,12 +87,16 @@ impl Scene {
         color / self.samples as f32
     }
 
-    pub fn to_u8(&self, color: Color) -> [u8; 3] {
+    pub fn to_u8_color(&self, color: Color) -> [u8; 3] {
         [
             color.r.clamp(0f32, 1f32),
             color.g.clamp(0f32, 1f32),
             color.b.clamp(0f32, 1f32),
         ]
-        .map(|l| (l.powf(1f32 / self.gamma) * 255f32 + 0.5f32) as u8)
+        .map(|l| self.to_u8(l))
+    }
+
+    pub fn to_u8(&self, value: f32) -> u8 {
+        (value.powf(1f32 / self.gamma) * 255f32 + 0.5f32) as u8
     }
 }
