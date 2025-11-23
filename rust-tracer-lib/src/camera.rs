@@ -29,10 +29,12 @@ impl Default for CameraDefinition {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Camera {
-    origin: Vector,
+    pub origin: Vector,
     reference: Vector,
     u: Vector,
     v: Vector,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl From<CameraDefinition> for Camera {
@@ -59,6 +61,8 @@ impl From<CameraDefinition> for Camera {
             reference,
             u,
             v,
+            width: definition.width,
+            height: definition.height,
         }
     }
 }
