@@ -1,6 +1,7 @@
 extern crate sdl2;
 
-use ::raytracer::{CameraDefinition, Scene};
+use ::raytracer::Scene;
+use ::raytracer::SceneDefinition;
 use clap::Parser;
 use rand::SeedableRng;
 use sdl2::event::Event;
@@ -50,7 +51,7 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
     let mut scene = config::Config::builder()
         .add_source(config::File::with_name(&cli.scene))
         .build()?
-        .try_deserialize::<Scene<CameraDefinition>>()?;
+        .try_deserialize::<SceneDefinition>()?;
     if cli.width == 0 {
         cli.width = scene.camera.width;
     } else {
@@ -76,7 +77,7 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
     } else {
         scene.gamma = cli.gamma;
     }
-    let scene = scene.map_camera(From::from);
+    let scene = Scene::from(scene);
     tracing::debug!("{scene:?}");
     Ok(scene)
 }

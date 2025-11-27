@@ -4,7 +4,7 @@ gamma: 3
 camera:
   origin: [50, 52, 295.6]
   direction: [0, -0.042612, -1]
-  field_of_view: 40
+  field_of_view: 35
 spheres:
   # Top Light
   - radius: 600

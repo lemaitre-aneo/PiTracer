@@ -10,7 +10,7 @@ pub struct CameraDefinition {
     pub field_of_view: f32,
     pub width: u32,
     pub height: u32,
-    pub world_width: f32,
+    pub world_height: f32,
 }
 
 impl Default for CameraDefinition {
@@ -21,13 +21,13 @@ impl Default for CameraDefinition {
             field_of_view: 90f32,
             width: 320,
             height: 240,
-            world_width: 0.1,
+            world_height: 0.1,
         }
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize)]
+#[serde(from = "CameraDefinition")]
 pub struct Camera {
     pub origin: Vector,
     reference: Vector,
@@ -39,9 +39,9 @@ pub struct Camera {
 
 impl From<CameraDefinition> for Camera {
     fn from(definition: CameraDefinition) -> Self {
-        let pixel_size = definition.world_width / definition.width as f32;
+        let pixel_size = definition.world_height / definition.height as f32;
         let reference_distance =
-            definition.world_width * 0.5f32 / (definition.field_of_view.to_radians() / 2f32).tan();
+            definition.world_height * 0.5f32 / (definition.field_of_view.to_radians() / 2f32).tan();
         let reference = definition.origin - reference_distance * definition.direction.normalized();
         const VUP: Vector = Vector {
             x: 0f32,
