@@ -60,9 +60,11 @@ impl Scene {
             let sphere = &self.spheres[i];
             let hit = best.as_geometry().to_hit(origin, direction, closest);
 
-            colors.push(best.as_texture(sphere).get(hit, rng));
+            let color = best.as_texture(sphere).get(hit, rng);
+            colors.push(color);
 
-            if colors.len() > self.recursion_depth as usize {
+            if colors.len() > self.recursion_depth as usize || color.attenuation == Color::default()
+            {
                 break;
             }
 
