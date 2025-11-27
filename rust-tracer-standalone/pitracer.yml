@@ -32,18 +32,19 @@ spheres:
   - radius: 16.5
     position: [40, 16.5, 47]
     color: [.999, .999, .999]
-    reflexivity: Specular
+    material: Metal
+    fuziness: 0.1
   - radius: 16.5
     position: [73, 46.5, 88]
     color: [.999, .999, .999]
-    reflexivity: Refraction
+    material: Refraction
   - radius: 10
     position: [15, 45, 112]
     color: [.999, .999, .999]
   - radius: 15
     position: [16, 16, 130]
     color: [.999, .999, .0]
-    reflexivity: Refraction
+    material: Refraction
   - radius: 10
     position: [80, 12, 92]
     color: [0, .999, 0]
