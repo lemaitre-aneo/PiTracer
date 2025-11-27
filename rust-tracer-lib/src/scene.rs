@@ -1,14 +1,13 @@
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::camera::*;
-use crate::color::*;
-use crate::sphere::*;
+use crate::{Camera, Color, Flat, Geometry, MaterialEnum, Object, Sphere};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Scene<C = Camera> {
     pub camera: C,
-    pub spheres: SphereVec,
+    pub spheres: Vec<Object<Sphere, MaterialEnum, Flat>>,
     pub recursion_depth: u32,
     pub samples: u32,
     pub gamma: f32,
@@ -39,43 +38,51 @@ impl<C> Scene<C> {
 }
 
 impl Scene {
-    pub fn radiance(&self, x: f32, y: f32, rng: &mut impl rand::Rng) -> Color {
+    pub fn radiance(&self, x: f32, y: f32, rng: &mut (dyn crate::Rng + 'static)) -> Color {
         let (mut origin, mut direction) = self.camera.cast(x, y);
 
-        // eprintln!("origin: {origin:?}\tdirection: {direction:?}");
         let mut colors = Vec::with_capacity(self.recursion_depth as usize);
 
         loop {
-            let Some((sphere, distance)) = Sphere::intersect_many(&self.spheres, origin, direction)
-            else {
+            let mut closest = f32::INFINITY;
+            let mut best = None;
+            for (i, sphere) in self.spheres.iter().enumerate() {
+                if let Some((distance, hit_caster)) = sphere.hit(origin, direction, rng) {
+                    if distance < closest && distance > 7e-2f32 {
+                        closest = distance;
+                        best = Some((hit_caster, i));
+                    }
+                }
+            }
+            let Some((best, i)) = best else {
                 break;
             };
+            let sphere = &self.spheres[i];
+            let hit = best.as_geometry().to_hit(origin, direction, closest);
 
-            if colors.len() >= self.recursion_depth as usize {
-                colors.push((sphere.emission.to_owned(), sphere.color.to_owned()));
+            colors.push(best.as_texture(sphere).get(hit, rng));
+
+            if colors.len() > self.recursion_depth as usize {
                 break;
             }
 
-            let radiance = sphere.radiance(origin, direction, distance, rng);
-
-            origin = radiance.origin;
-            direction = radiance.direction;
-            colors.push((radiance.emission, radiance.absorption));
-
-            if radiance.absorption == Color::default() {
+            if let Some(new_direction) = best.as_material(sphere).scatter(direction, hit, rng) {
+                origin = hit.point;
+                direction = new_direction;
+            } else {
                 break;
             }
         }
 
         let mut color = Color::default();
-        for (emission, absorption) in colors.into_iter().rev() {
-            color = emission + color * absorption;
+        for texture in colors.into_iter().rev() {
+            color = texture.emission + color * texture.attenuation;
         }
 
         color
     }
 
-    pub fn pixel_radiance(&self, x: u32, y: u32, rng: &mut impl rand::Rng) -> Color {
+    pub fn pixel_radiance(&self, x: u32, y: u32, rng: &mut (impl crate::Rng + 'static)) -> Color {
         let mut color = Color::default();
         for _ in 0..self.samples {
             let x = x as f32 + rng.random::<f32>();

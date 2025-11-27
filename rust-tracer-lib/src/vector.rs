@@ -1,7 +1,46 @@
-use serde::{Deserialize, Serialize, de::Visitor};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize)]
-#[serde(default)]
+mod definition {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Empty {}
+
+    #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub(super) enum Vector<T = f32> {
+        #[default]
+        Default,
+        Empty(Empty),
+        List(T, T, T),
+        Map {
+            x: T,
+            y: T,
+            z: T,
+        },
+    }
+
+    impl<T> From<super::Vector<T>> for Vector<T> {
+        fn from(value: super::Vector<T>) -> Self {
+            Self::List(value.x, value.y, value.z)
+        }
+    }
+
+    impl<T: Default> From<Vector<T>> for super::Vector<T> {
+        fn from(value: Vector<T>) -> Self {
+            match value {
+                Vector::List(x, y, z) => Self { x, y, z },
+                Vector::Map { x, y, z } => Self { x, y, z },
+                _ => Self::default(),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(from = "definition::Vector<T>", into = "definition::Vector<T>")]
+#[serde(bound = "for <'a> T: Default + Clone + Serialize + Deserialize<'a>")]
 pub struct Vector<T = f32> {
     pub x: T,
     pub y: T,
@@ -9,53 +48,6 @@ pub struct Vector<T = f32> {
 }
 
 pub type VectorVec = Vec<Vector>;
-
-impl<'de> Deserialize<'de> for Vector {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct FieldVisitor;
-
-        impl<'de> Visitor<'de> for FieldVisitor {
-            type Value = Vector;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("either {x: f32, y: f32, z: f32} or (f32, f32, f32)")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                Ok(Vector {
-                    x: seq.next_element()?.unwrap_or_default(),
-                    y: seq.next_element()?.unwrap_or_default(),
-                    z: seq.next_element()?.unwrap_or_default(),
-                })
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::MapAccess<'de>,
-            {
-                let mut vec = Vector::default();
-
-                while let Some((key, value)) = map.next_entry::<String, f32>()? {
-                    match key.as_str() {
-                        "x" => vec.x = value,
-                        "y" => vec.y = value,
-                        "z" => vec.z = value,
-                        _ => Err(serde::de::Error::custom("Expected either `x`, `y`, `z`"))?,
-                    }
-                }
-                Ok(vec)
-            }
-        }
-
-        deserializer.deserialize_any(FieldVisitor)
-    }
-}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]
 pub struct UnitVector<T = f32>(Vector<T>);
@@ -204,8 +196,12 @@ impl Vector {
         let an = 2f32 * (self * normal).sum();
         self - an * normal
     }
-    pub fn cross(self, rhs: impl Into<Vector>) -> Vector {
-        let rhs = rhs.into();
+    pub fn dot(self, rhs: impl std::borrow::Borrow<Vector>) -> f32 {
+        let rhs = *rhs.borrow();
+        (self * rhs).sum()
+    }
+    pub fn cross(self, rhs: impl std::borrow::Borrow<Vector>) -> Vector {
+        let rhs = *rhs.borrow();
         Vector {
             x: self.y * rhs.z - self.z * rhs.y,
             y: self.z * rhs.x - self.x * rhs.z,
@@ -227,7 +223,7 @@ impl UnitVector {
     pub fn reflect(self, normal: UnitVector) -> UnitVector {
         UnitVector(self.0.reflect(normal))
     }
-    pub fn random(rng: &mut impl rand::Rng) -> UnitVector {
+    pub fn random<R: rand::Rng + ?Sized>(rng: &mut R) -> UnitVector {
         loop {
             let v = Vector {
                 x: rng.random(),
@@ -241,43 +237,8 @@ impl UnitVector {
             }
         }
     }
-    pub fn random_hemisphere(normal: UnitVector, rng: &mut impl rand::Rng) -> UnitVector {
+    pub fn random_hemisphere<R: rand::Rng + ?Sized>(normal: UnitVector, rng: &mut R) -> UnitVector {
         let vec = Self::random(rng);
         crate::select(vec.dot(normal) > 0f32, vec, -vec)
-    }
-}
-
-pub trait Dot<Rhs = Self> {
-    type Output;
-    fn dot(self, rhs: Rhs) -> Self::Output;
-}
-
-impl Dot<Vector> for Vector {
-    type Output = f32;
-
-    fn dot(self, rhs: Vector) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
-impl Dot<UnitVector> for Vector {
-    type Output = f32;
-
-    fn dot(self, rhs: UnitVector) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
-
-impl Dot<Vector> for UnitVector {
-    type Output = f32;
-
-    fn dot(self, rhs: Vector) -> Self::Output {
-        (self * rhs).sum()
-    }
-}
-impl Dot<UnitVector> for UnitVector {
-    type Output = f32;
-
-    fn dot(self, rhs: UnitVector) -> Self::Output {
-        (self * rhs).sum()
     }
 }

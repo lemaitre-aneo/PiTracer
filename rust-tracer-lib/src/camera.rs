@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::vector::*;
+use crate::{UnitVector, Vector};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

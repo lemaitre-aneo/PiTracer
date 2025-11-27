@@ -1,6 +1,46 @@
-use serde::{Deserialize, Serialize, de::Visitor};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize)]
+mod definition {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Empty {}
+
+    #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub(super) enum Color<T = f32> {
+        #[default]
+        Default,
+        Empty(Empty),
+        List(T, T, T),
+        Map {
+            r: T,
+            g: T,
+            b: T,
+        },
+    }
+
+    impl<T> From<super::Color<T>> for Color<T> {
+        fn from(value: super::Color<T>) -> Self {
+            Self::List(value.r, value.g, value.b)
+        }
+    }
+
+    impl<T: Default> From<Color<T>> for super::Color<T> {
+        fn from(value: Color<T>) -> Self {
+            match value {
+                Color::List(r, g, b) => Self { r, g, b },
+                Color::Map { r, g, b } => Self { r, g, b },
+                _ => Self::default(),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(from = "definition::Color<T>", into = "definition::Color<T>")]
+#[serde(bound = "for <'a> T: Default + Clone + Serialize + Deserialize<'a>")]
 #[serde(default)]
 pub struct Color<T = f32> {
     pub r: T,
@@ -9,54 +49,6 @@ pub struct Color<T = f32> {
 }
 
 pub type ColorVec = Vec<Color>;
-
-impl<'de> Deserialize<'de> for Color {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct FieldVisitor;
-
-        impl<'de> Visitor<'de> for FieldVisitor {
-            type Value = Color;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("either {r: f32, g: f32, b: f32} or (f32, f32, f32)")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                Ok(Color {
-                    r: seq.next_element()?.unwrap_or_default(),
-                    g: seq.next_element()?.unwrap_or_default(),
-                    b: seq.next_element()?.unwrap_or_default(),
-                })
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::MapAccess<'de>,
-            {
-                let mut color = Color::default();
-
-                while let Some((key, value)) = map.next_entry::<String, f32>()? {
-                    match key.as_ref() {
-                        "r" => color.r = value,
-                        "g" => color.g = value,
-                        "b" => color.b = value,
-                        _ => Err(serde::de::Error::custom("Expected either `r`, `g`, `b`"))?,
-                    }
-                }
-                Ok(color)
-            }
-        }
-
-        deserializer.deserialize_any(FieldVisitor)
-    }
-}
-
 
 macro_rules! impl_op {
     ($op:ident($opassign:ident): $trait:ident($traitassign:ident): $assign:tt) => {
