@@ -242,3 +242,54 @@ pub fn main() -> Result<(), eyre::Report> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod test {
+    use rand::Rng as _;
+    use rand::SeedableRng;
+
+    fn scene(light_sampling: bool) -> ::raytracer::Scene {
+        let mut definition = config::Config::builder()
+            .add_source(config::File::with_name("pitracer.yml"))
+            .build()
+            .unwrap()
+            .try_deserialize::<::raytracer::SceneDefinition>()
+            .unwrap();
+        definition.light_sampling = light_sampling;
+        ::raytracer::Scene::from(definition)
+    }
+
+    /// Regression: on the real scene, every radiance sample must be finite
+    /// and below the physical path bound 2·E_max·(depth+1) — fireflies from
+    /// estimator reweighting showed up here as saturated specks.
+    #[test]
+    fn pitracer_radiance_finite_and_bounded() {
+        for light_sampling in [false, true] {
+            let scene = scene(light_sampling);
+            let bound = 2.0 * 10.0 * (scene.recursion_depth + 1) as f32;
+            let mut rng = rand::rngs::SmallRng::seed_from_u64(7);
+            let mut max = 0f32;
+            for py in (0..scene.camera.height).step_by(4) {
+                for px in (0..scene.camera.width).step_by(4) {
+                    for _ in 0..8 {
+                        let x = px as f32 + rng.random::<f32>();
+                        let y = py as f32 + rng.random::<f32>();
+                        let c = scene.radiance(x, y, &mut rng);
+                        for v in [c.r, c.g, c.b] {
+                            assert!(
+                                v.is_finite(),
+                                "non-finite radiance at ({px},{py}), light_sampling={light_sampling}: {c:?}",
+                            );
+                            max = max.max(v);
+                        }
+                    }
+                }
+            }
+            eprintln!("light_sampling={light_sampling}: max sample = {max:.1} (bound {bound})");
+            assert!(
+                max <= bound,
+                "firefly at light_sampling={light_sampling}: max {max} exceeds bound {bound}",
+            );
+        }
+    }
+}

@@ -4,7 +4,8 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Camera, CameraDefinition, Color, Flat, Geometry, Hittable, MaterialEnum, Object, Sphere,
+    Camera, CameraDefinition, Color, Flat, Geometry, HitCaster, Hittable, MaterialEnum, Object,
+    Sphere, TextureProperty, UnitVector, Vector,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -111,51 +112,88 @@ impl From<SceneDefinition> for Scene {
 }
 
 impl Scene {
+    /// Nearest hit along a ray, honoring the self-intersection guard.
+    fn closest_hit(
+        &self,
+        origin: Vector,
+        direction: UnitVector,
+        rng: &mut (dyn crate::Rng + 'static),
+    ) -> Option<(&dyn HitCaster, &dyn Hittable, f32)> {
+        let mut closest = f32::INFINITY;
+        let mut best = None;
+        for (i, hittable) in self.hittables.iter().enumerate() {
+            if let Some((distance, hit_caster)) = hittable.hit(origin, direction, rng)
+                && distance < closest
+                && distance > crate::HIT_EPSILON
+            {
+                closest = distance;
+                best = Some((hit_caster, i));
+            }
+        }
+        best.map(|(caster, i)| (caster, self.hittables[i].as_ref(), closest))
+    }
+
+    /// Density of the one-sample light-target strategy at `point` toward
+    /// `direction` (mixture of the emissive objects' solid-angle pdfs, by
+    /// their normalized weights).
+    fn light_pdf(&self, point: Vector, direction: UnitVector) -> f32 {
+        let mut pdf = 0f32;
+        for (geometry, weight, _) in &self.points_of_interest {
+            pdf += geometry.target_pdf(point, direction) * weight;
+        }
+        pdf
+    }
+
     pub fn radiance(&self, x: f32, y: f32, rng: &mut (dyn crate::Rng + 'static)) -> Color {
         let (mut origin, mut direction) = self.camera.cast(x, y);
 
         let mut colors = Vec::with_capacity(self.recursion_depth as usize);
 
+        // Light transport with next-event estimation: at each diffuse bounce
+        // the light is sampled explicitly (direct term), while the path keeps
+        // following pure BRDF samples with unweighted throughput. Emitters can
+        // therefore be found by two strategies, so each pickup is weighted by
+        // the balance heuristic: p_used / (p_material + p_light) — direct
+        // samples via p_light, continuation hits via p_material (carried in
+        // `emission_weight`). All weights are ≤ 1: unlike a throughput-
+        // reweighting mixture (whose off-light weight is 2 per bounce, i.e.
+        // 2^k fireflies on deep paths), no path can exceed the physical bound.
+        let mut emission_weight = 1f32;
+
         loop {
-            let mut closest = f32::INFINITY;
-            let mut best = None;
-            for (i, hittable) in self.hittables.iter().enumerate() {
-                if let Some((distance, hit_caster)) = hittable.hit(origin, direction, rng)
-                    && distance < closest
-                    && distance > crate::HIT_EPSILON
-                {
-                    closest = distance;
-                    best = Some((hit_caster, i));
-                }
-            }
-            let Some((best, i)) = best else {
+            let Some((best, hittable, closest)) = self.closest_hit(origin, direction, rng) else {
                 break;
             };
-            let hittable = self.hittables[i].as_ref();
             let hit = best.as_geometry().to_hit(origin, direction, closest);
 
-            let color = best.as_texture(hittable).get(hit, rng);
-            colors.push(color);
+            let texture = best.as_texture(hittable).get(hit, rng);
+            let mut color = TextureProperty {
+                emission: texture.emission * emission_weight,
+                attenuation: texture.attenuation,
+            };
 
-            if colors.len() > self.recursion_depth as usize || color.attenuation == Color::default()
+            if colors.len() + 1 > self.recursion_depth as usize
+                || texture.attenuation == Color::default()
             {
+                colors.push(color);
                 break;
             }
 
             let material = best.as_material(hittable);
-            let Some(mut scattered) = material.scatter(direction, hit, rng) else {
+            let Some(scattered) = material.scatter(direction, hit, rng) else {
+                colors.push(color);
                 break;
             };
 
             let material_pdf = material.pdf(direction, hit, scattered);
-            // eprintln!("PDF: {material_pdf} -> {:?}", self.points_of_interest);
 
             if self.light_sampling && material_pdf > 0f32 && !self.points_of_interest.is_empty() {
-                // One-sample mixture estimator: with probability 1/2 keep the
-                // BRDF sample, otherwise sample a light (by weight), then
-                // reweight by p_material/p_mixture. Sampling and pdfs are all
-                // evaluated from the shading point.
-                let random = 2f32 * rng.random::<f32>();
+                // Next-event estimation: pick one light by weight, sample a
+                // direction toward it, and collect whatever emission that ray
+                // reaches (an occluder contributes its own emission: 0 for
+                // dark objects, and other lights are covered by the mixture
+                // density `light_pdf`).
+                let random = rng.random::<f32>();
                 let candidate = match self.points_of_interest.binary_search_by(|(_, _, c)| {
                     c.partial_cmp(&random).unwrap_or(std::cmp::Ordering::Equal)
                 }) {
@@ -163,31 +201,39 @@ impl Scene {
                     Err(x) => self.points_of_interest.get(x),
                 };
 
-                let scattered_candidate = if let Some((geometry, _, _)) = candidate {
-                    geometry.target_random(hit.point, rng)
-                } else {
-                    scattered
-                };
-                let scattering_pdf = material.pdf(direction, hit, scattered_candidate);
-
-                if scattering_pdf > 0f32 {
-                    let mut pdf = scattering_pdf;
-                    for (geometry, weight, _) in &self.points_of_interest {
-                        pdf += geometry.target_pdf(hit.point, scattered_candidate) * weight;
+                if let Some((geometry, _, _)) = candidate {
+                    let light_direction = geometry.target_random(hit.point, rng);
+                    // For cosine-sampled Lambertian, f·cosθ = albedo·pdf, so
+                    // the balance-weighted direct term is ρ·pm/(pl + pm)·L_e.
+                    let pm = material.pdf(direction, hit, light_direction);
+                    let pl = self.light_pdf(hit.point, light_direction);
+                    if pm > 0f32
+                        && pl > 0f32
+                        && let Some((direct, direct_hittable, direct_distance)) =
+                            self.closest_hit(hit.point, light_direction, rng)
+                    {
+                        let direct_hit = direct.as_geometry().to_hit(
+                            hit.point,
+                            light_direction,
+                            direct_distance,
+                        );
+                        let direct_emission =
+                            direct.as_texture(direct_hittable).get(direct_hit, rng).emission;
+                        color.emission +=
+                            texture.attenuation * direct_emission * (pm / (pl + pm));
                     }
-                    pdf /= 2f32;
-
-                    scattered = scattered_candidate;
-
-                    colors.last_mut().unwrap().attenuation *= scattering_pdf / pdf;
-                } else {
-                    // Zero BRDF density (e.g. a light sample below the
-                    // horizon): this direction contributes nothing, so the
-                    // path ends here. Resampling instead would silently
-                    // renormalize the mixture and bias the estimator.
-                    break;
                 }
+
+                // Balance weight for emission the continuation ray may find.
+                emission_weight =
+                    material_pdf / (material_pdf + self.light_pdf(hit.point, scattered));
+            } else {
+                // No light sampling at this bounce (specular or no lights):
+                // the continuation ray is the only strategy — full pickup.
+                emission_weight = 1f32;
             }
+
+            colors.push(color);
 
             origin = hit.point;
             direction = scattered;
@@ -697,6 +743,46 @@ mod test {
                 stats[0].mean(),
             );
         }
+    }
+
+    /// Fireflies (speck noise): with next-event estimation every collected
+    /// term is at most (1 + ρ)·E_max ≤ 2·E_max and there are at most depth+1
+    /// of them, so no path sample can exceed 2·E_max·(depth+1) — a
+    /// deterministic bound, not a statistical one. A throughput-reweighting
+    /// mixture estimator violates it exponentially: its off-light weight is
+    /// 2 per bounce, so deep paths carry ~(2ρ)^k and show up as saturated
+    /// specks on bright-albedo scenes.
+    #[test]
+    fn light_sampling_no_fireflies() {
+        let depth = 30;
+        let scene = scene(
+            (0f32, 0f32, 0f32),
+            (0f32, 0f32, 1f32),
+            vec![
+                // near-white enclosure: deep paths keep almost full throughput
+                lambertian(
+                    (0f32, 0f32, 0f32),
+                    10f32,
+                    (0.999f32, 0.999f32, 0.999f32),
+                    (0f32, 0f32, 0f32),
+                ),
+                // small bright light inside
+                lambertian((0f32, 8f32, 0f32), 1f32, (0f32, 0f32, 0f32), (10f32, 10f32, 10f32)),
+            ],
+            depth,
+            true,
+        );
+        let bound = 2f64 * 10f64 * f64::from(depth + 1);
+        let mut rng = rng(seeds()[0]);
+        let mut max = 0f64;
+        for _ in 0..100_000 {
+            let color = scene.radiance(2f32, 2f32, &mut rng);
+            for value in [color.r, color.g, color.b] {
+                assert!(value.is_finite(), "non-finite radiance {color:?}");
+                max = max.max(f64::from(value));
+            }
+        }
+        assert!(max <= bound, "firefly: max sample {max} exceeds the physical bound {bound}");
     }
 
     /// Heavy tier: tighter convergence bounds (β ≈ 1% on the anchor).
