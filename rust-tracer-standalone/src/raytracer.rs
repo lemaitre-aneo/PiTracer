@@ -1,8 +1,6 @@
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32},
-    },
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU32},
 };
 
 use rand::{RngCore, SeedableRng};
@@ -86,11 +84,8 @@ impl Raytracer {
             },
             pixels: unsafe {
                 std::alloc::alloc(
-                    std::alloc::Layout::from_size_align(
-                        total_size * std::mem::size_of::<u8>(),
-                        16,
-                    )
-                    .unwrap_unchecked(),
+                    std::alloc::Layout::from_size_align(total_size * std::mem::size_of::<u8>(), 16)
+                        .unwrap_unchecked(),
                 )
             },
             stopping: AtomicBool::new(false),
@@ -183,7 +178,6 @@ impl Raytracer {
     }
 
     pub fn stopping(&self) -> bool {
-        self.stopping
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.stopping.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

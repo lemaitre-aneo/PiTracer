@@ -45,6 +45,10 @@ pub struct Cli {
     /// Gamma
     #[arg(short, long, default_value = "0")]
     pub gamma: f32,
+
+    /// Light Sampling [default: true]
+    #[arg(long)]
+    pub light_sampling: Option<bool>,
 }
 
 fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
@@ -76,6 +80,11 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
         cli.gamma = scene.gamma;
     } else {
         scene.gamma = cli.gamma;
+    }
+    if let Some(ls) = cli.light_sampling {
+        scene.light_sampling = ls;
+    } else {
+        cli.light_sampling = Some(scene.light_sampling);
     }
     let scene = Scene::from(scene);
     tracing::debug!("{scene:?}");

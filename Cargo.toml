@@ -5,3 +5,7 @@ members = [ "rust-tracer-client","rust-tracer-lib", "rust-tracer-standalone", "r
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+
+# The statistical tests in rust-tracer-lib need optimized Monte-Carlo loops.
+[profile.test]
+opt-level = 3

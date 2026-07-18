@@ -1,8 +1,12 @@
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 mod camera;
 mod color;
 mod geometry;
 mod hittable;
 mod material;
+mod onb;
 mod scene;
 mod texture;
 mod vector;
@@ -12,9 +16,16 @@ pub use color::*;
 pub use geometry::*;
 pub use hittable::*;
 pub use material::*;
+pub use onb::*;
 pub use scene::*;
 pub use texture::*;
 pub use vector::*;
+
+/// Minimum hit distance: intersections closer than this are treated as
+/// self-intersections of the ray with its own originating surface.
+/// Sized for f32 geometry (the classic scene has radius-1e5 walls, where
+/// |oc|² carries an absolute rounding error of order 1e3).
+pub const HIT_EPSILON: f32 = 7e-2;
 
 pub fn select<T>(cond: bool, then: T, otherwise: T) -> T {
     // unsafe {

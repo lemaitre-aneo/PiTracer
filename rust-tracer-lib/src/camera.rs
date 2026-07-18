@@ -75,3 +75,85 @@ impl Camera {
         (origin, direction)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test_utils::{assert_close, assert_vec_close, rng, seeds};
+
+    // Pinhole spec: `field_of_view` is the full vertical angle subtended by
+    // the image; square pixels, so the horizontal angle follows from the
+    // aspect ratio. Even width/height only (center pixel must be exact).
+    fn camera(field_of_view: f32) -> Camera {
+        Camera::from(CameraDefinition {
+            origin: Vector::from((1f32, 2f32, 3f32)),
+            direction: Vector::from((0.2f32, -0.4f32, 1f32)),
+            field_of_view,
+            width: 320,
+            height: 240,
+            world_height: 0.1,
+        })
+    }
+
+    #[test]
+    fn center_ray_is_camera_direction() {
+        let camera = camera(90f32);
+        let (origin, direction) = camera.cast(160f32, 120f32);
+
+        assert_vec_close(origin, Vector::from((1f32, 2f32, 3f32)), 1e-6);
+        assert_vec_close(
+            Vector::from(direction),
+            Vector::from(Vector::from((0.2f32, -0.4f32, 1f32)).normalized()),
+            1e-6,
+        );
+    }
+
+    /// The rays through the two vertical image edges (at the horizontal
+    /// center) must subtend exactly `field_of_view`; horizontally, square
+    /// pixels give 2·atan(tan(fov/2)·width/height).
+    #[test]
+    fn vertical_fov_exact() {
+        for fov in [60f32, 90f32, 120f32] {
+            let camera = camera(fov);
+
+            let top = camera.cast(160f32, 0f32).1;
+            let bottom = camera.cast(160f32, 240f32).1;
+            assert_close(top.dot(bottom).acos().to_degrees(), fov, 1e-5);
+
+            let left = camera.cast(0f32, 120f32).1;
+            let right = camera.cast(320f32, 120f32).1;
+            let expected = 2f32
+                * ((fov / 2f32).to_radians().tan() * 320f32 / 240f32)
+                    .atan()
+                    .to_degrees();
+            assert_close(left.dot(right).acos().to_degrees(), expected, 1e-5);
+        }
+    }
+
+    #[test]
+    fn rays_are_normalized_and_continuous() {
+        use rand::Rng as _;
+
+        let camera = camera(90f32);
+        let mut rng = rng(seeds()[0]);
+        for _ in 0..100 {
+            let x = rng.random::<f32>() * 320f32;
+            let y = rng.random::<f32>() * 240f32;
+            let (_, direction) = camera.cast(x, y);
+            assert_close(Vector::from(direction).norm2(), 1f32, 1e-6);
+        }
+
+        // a vertical sweep of directions is a planar fan of < 180°: the
+        // component along the fan axis must be strictly monotone in y
+        let first = camera.cast(160f32, 0f32).1;
+        let last = camera.cast(160f32, 240f32).1;
+        let axis = (last - first).normalized();
+        let mut previous = f32::NEG_INFINITY;
+        for i in 0..=48 {
+            let direction = camera.cast(160f32, 240f32 * i as f32 / 48f32).1;
+            let along = direction.dot(axis);
+            assert!(along > previous, "direction sweep not monotone at step {i}");
+            previous = along;
+        }
+    }
+}

@@ -7,9 +7,9 @@ camera:
   field_of_view: 35
 spheres:
   # Top Light
-  - radius: 600
-    position: [50, 681.33, 81.6]
-    emission: [1, 1, 1]
+  - radius: 10
+    position: [50, 81.6, 61.6]
+    emission: [10, 10, 10]
   # Walls
   - radius: 100000
     position: [100001, 40.8, 81.6]

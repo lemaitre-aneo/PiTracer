@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::Onb;
+
 mod definition {
     use serde::{Deserialize, Serialize};
 
@@ -49,7 +51,7 @@ pub struct Vector<T = f32> {
 
 pub type VectorVec = Vec<Vector>;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct UnitVector<T = f32>(Vector<T>);
 
 macro_rules! impl_op {
@@ -174,6 +176,16 @@ impl std::borrow::Borrow<Vector> for UnitVector {
     }
 }
 
+impl Default for UnitVector {
+    fn default() -> Self {
+        Self(Vector {
+            x: 0f32,
+            y: 1f32,
+            z: 0f32,
+        })
+    }
+}
+
 impl Vector {
     pub fn splat(value: f32) -> Self {
         value.into()
@@ -211,6 +223,22 @@ impl Vector {
 }
 
 impl UnitVector {
+    pub const X: UnitVector = UnitVector(Vector {
+        x: 1f32,
+        y: 0f32,
+        z: 0f32,
+    });
+    pub const Y: UnitVector = UnitVector(Vector {
+        x: 0f32,
+        y: 1f32,
+        z: 0f32,
+    });
+    pub const Z: UnitVector = UnitVector(Vector {
+        x: 0f32,
+        y: 0f32,
+        z: 1f32,
+    });
+
     pub fn norm(self) -> f32 {
         1f32
     }
@@ -240,5 +268,287 @@ impl UnitVector {
     pub fn random_hemisphere<R: rand::Rng + ?Sized>(normal: UnitVector, rng: &mut R) -> UnitVector {
         let vec = Self::random(rng);
         crate::select(vec.dot(normal) > 0f32, vec, -vec)
+    }
+
+    pub fn random_cosine_local<R: rand::Rng + ?Sized>(rng: &mut R) -> UnitVector {
+        let r1 = rng.random::<f32>();
+        let r2 = rng.random::<f32>();
+        let r2_sqrt = r2.sqrt();
+
+        let phi = 2f32 * std::f32::consts::PI * r1;
+        let x = phi.cos() * r2_sqrt;
+        let y = phi.sin() * r2_sqrt;
+        let z = (1f32 - r2).sqrt();
+
+        UnitVector(Vector { x, y, z })
+    }
+
+    pub fn random_cosine<R: rand::Rng + ?Sized>(normal: UnitVector, rng: &mut R) -> UnitVector {
+        UnitVector(Onb::new(normal).transform(UnitVector::random_cosine_local(rng).0))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use rand::Rng as _;
+    use rand::rngs::SmallRng;
+
+    use super::*;
+    use crate::test_utils::{
+        Stats, assert_close, assert_stat_close, assert_vec_close, chi2_directions, rng, seeds,
+    };
+
+    fn random_vector(rng: &mut SmallRng) -> Vector {
+        Vector {
+            x: rng.random::<f32>() * 10f32 - 5f32,
+            y: rng.random::<f32>() * 10f32 - 5f32,
+            z: rng.random::<f32>() * 10f32 - 5f32,
+        }
+    }
+
+    /// Reflection off a plane with unit normal n is the Householder map
+    /// r = v - 2(v·n)n: an isometric involution that flips the normal
+    /// component and preserves the tangential one.
+    #[test]
+    fn reflect_involution_and_norm() {
+        let mut rng = rng(seeds()[0]);
+        for _ in 0..1000 {
+            let v = random_vector(&mut rng);
+            let n = UnitVector::random(&mut rng);
+            let r = v.reflect(n);
+
+            assert_vec_close(r.reflect(n), v, 1e-5);
+            assert_close(r.norm(), v.norm(), 1e-5);
+            assert_close(r.dot(n), -v.dot(n), 1e-5);
+            assert_vec_close(r - r.dot(n) * n, v - v.dot(n) * n, 1e-5);
+        }
+
+        assert_eq!(
+            Vector::from((1f32, -1f32, 0f32)).reflect(UnitVector::Y),
+            Vector::from((1f32, 1f32, 0f32)),
+        );
+        assert_eq!(
+            Vector::from((-UnitVector::Y).reflect(UnitVector::Y)),
+            Vector::from(UnitVector::Y)
+        );
+        // vector orthogonal to the normal is unchanged
+        assert_eq!(
+            Vector::from((1f32, 0f32, 0f32)).reflect(UnitVector::Y),
+            Vector::from((1f32, 0f32, 0f32)),
+        );
+    }
+
+    #[test]
+    fn normalized_is_unit() {
+        let mut rng = rng(seeds()[0]);
+        for _ in 0..1000 {
+            let v = random_vector(&mut rng);
+            if v.norm() < 1e-6 {
+                continue;
+            }
+            let u = v.normalized();
+            assert_close(Vector::from(u).norm2(), 1f32, 1e-6);
+            // same direction: u·v == |v|
+            assert_close(u.dot(v), v.norm(), 1e-5);
+        }
+    }
+
+    /// UnitVector::random must be uniform on the sphere: density 1/4π,
+    /// so E[ωᵢ] = 0, E[ωᵢ²] = 1/3, E[ωᵢωⱼ] = 0 (i≠j).
+    #[test]
+    fn unit_random_is_uniform_sphere() {
+        for seed in seeds() {
+            let mut rng = rng(seed);
+            let mut stats = [Stats::new(); 9];
+            for _ in 0..100_000 {
+                let w = UnitVector::random(&mut rng);
+                for (stat, value) in stats.iter_mut().zip([
+                    w.x,
+                    w.y,
+                    w.z,
+                    w.x * w.x,
+                    w.y * w.y,
+                    w.z * w.z,
+                    w.x * w.y,
+                    w.y * w.z,
+                    w.z * w.x,
+                ]) {
+                    stat.push(value);
+                }
+            }
+            let expected = [
+                0f32,
+                0f32,
+                0f32,
+                1f32 / 3f32,
+                1f32 / 3f32,
+                1f32 / 3f32,
+                0f32,
+                0f32,
+                0f32,
+            ];
+            for (stat, expected) in stats.iter().zip(expected) {
+                assert_stat_close(stat.mean(), stat.se(), expected, 4f32, 0f32);
+            }
+        }
+
+        // goodness-of-fit: z-marginal of the uniform sphere is uniform on [-1, 1]
+        let mut rng = rng(seeds()[0]);
+        chi2_directions(
+            50_000,
+            &mut rng,
+            UnitVector::Z,
+            -1f64,
+            10,
+            10,
+            UnitVector::random,
+            |z0, z1| (z1 - z0) / 2.0,
+        );
+    }
+
+    #[test]
+    fn unit_random_norm() {
+        let mut rng = rng(seeds()[0]);
+        for _ in 0..1000 {
+            let w = UnitVector::random(&mut rng);
+            assert_close(Vector::from(w).norm2(), 1f32, 1e-6);
+        }
+    }
+
+    /// Cosine-weighted hemisphere sampling has density p(ω) = z/π (z ≥ 0), so
+    /// E[z^k] = ∫ z^k (z/π) dω = 2/(k+2): E[z] = 2/3, E[z²] = 1/2, and by
+    /// symmetry E[x] = E[y] = 0, E[x²] = E[y²] = (1 - E[z²])/2 = 1/4.
+    /// The z-slice [z0, z1] carries probability z1² - z0².
+    #[test]
+    fn random_cosine_local_matches_cosine_density() {
+        for seed in seeds() {
+            let mut rng = rng(seed);
+            let mut stats = [Stats::new(); 5];
+            for _ in 0..100_000 {
+                let w = UnitVector::random_cosine_local(&mut rng);
+                assert!(w.z >= 0f32, "cosine sample below the horizon: {w:?}");
+                for (stat, value) in stats.iter_mut().zip([w.z, w.z * w.z, w.x, w.y, w.x * w.x]) {
+                    stat.push(value);
+                }
+            }
+            let expected = [2f32 / 3f32, 0.5f32, 0f32, 0f32, 0.25f32];
+            for (stat, expected) in stats.iter().zip(expected) {
+                assert_stat_close(stat.mean(), stat.se(), expected, 4f32, 0f32);
+            }
+        }
+
+        let mut rng = rng(seeds()[0]);
+        chi2_directions(
+            50_000,
+            &mut rng,
+            UnitVector::Z,
+            0f64,
+            10,
+            10,
+            UnitVector::random_cosine_local,
+            |z0, z1| z1 * z1 - z0 * z0,
+        );
+    }
+
+    /// Same distribution around arbitrary (non-axis) normals, with z := ω·n.
+    /// This closes the local-sample + ONB-transform loop end to end.
+    #[test]
+    fn random_cosine_respects_normal() {
+        let normals = [
+            Vector::from((1f32, 2f32, 3f32)).normalized(),
+            Vector::from((-1f32, 0.1f32, 0.5f32)).normalized(),
+            Vector::from((0.3f32, -0.9f32, 0.6f32)).normalized(),
+            Vector::from((-2f32, -1f32, -3f32)).normalized(),
+            Vector::from((5f32, 0.1f32, -0.1f32)).normalized(),
+        ];
+        for normal in normals {
+            let mut rng = rng(seeds()[0]);
+            let mut stats = [Stats::new(); 2];
+            for _ in 0..50_000 {
+                let w = UnitVector::random_cosine(normal, &mut rng);
+                let z = w.dot(normal);
+                assert!(
+                    z >= -1e-6,
+                    "cosine sample below the horizon of {normal:?}: {w:?}"
+                );
+                stats[0].push(z);
+                stats[1].push(z * z);
+            }
+            assert_stat_close(stats[0].mean(), stats[0].se(), 2f32 / 3f32, 4f32, 0f32);
+            assert_stat_close(stats[1].mean(), stats[1].se(), 0.5f32, 4f32, 0f32);
+        }
+
+        let normal = normals[0];
+        let mut rng = rng(seeds()[1]);
+        chi2_directions(
+            50_000,
+            &mut rng,
+            normal,
+            0f64,
+            10,
+            10,
+            |rng| UnitVector::random_cosine(normal, rng),
+            |z0, z1| z1 * z1 - z0 * z0,
+        );
+    }
+
+    /// Uniform hemisphere sampling has density 1/2π on {ω·n ≥ 0}, so
+    /// E[z^k] = ∫₀¹ z^k dz = 1/(k+1): E[z] = 1/2, E[z²] = 1/3.
+    #[test]
+    fn random_hemisphere_is_uniform_hemisphere() {
+        let normal = Vector::from((1f32, 2f32, 3f32)).normalized();
+        for seed in seeds() {
+            let mut rng = rng(seed);
+            let mut stats = [Stats::new(); 2];
+            for _ in 0..100_000 {
+                let w = UnitVector::random_hemisphere(normal, &mut rng);
+                let z = w.dot(normal);
+                assert!(z >= -1e-6, "hemisphere sample below the horizon: {w:?}");
+                stats[0].push(z);
+                stats[1].push(z * z);
+            }
+            assert_stat_close(stats[0].mean(), stats[0].se(), 0.5f32, 4f32, 0f32);
+            assert_stat_close(stats[1].mean(), stats[1].se(), 1f32 / 3f32, 4f32, 0f32);
+        }
+
+        let mut rng = rng(seeds()[0]);
+        chi2_directions(
+            50_000,
+            &mut rng,
+            normal,
+            0f64,
+            10,
+            10,
+            |rng| UnitVector::random_hemisphere(normal, rng),
+            |z0, z1| z1 - z0,
+        );
+    }
+
+    /// Heavy tier: same goodness-of-fit checks with 10× the samples and a
+    /// finer grid. Run with `cargo test -p rust-tracer-lib -- --ignored`.
+    #[test]
+    #[ignore = "heavy convergence tier"]
+    fn heavy_chi2_samplers() {
+        let mut rng = rng(seeds()[2]);
+        chi2_directions(
+            1_000_000,
+            &mut rng,
+            UnitVector::Z,
+            -1f64,
+            20,
+            20,
+            UnitVector::random,
+            |z0, z1| (z1 - z0) / 2.0,
+        );
+        chi2_directions(
+            1_000_000,
+            &mut rng,
+            UnitVector::Z,
+            0f64,
+            20,
+            20,
+            UnitVector::random_cosine_local,
+            |z0, z1| z1 * z1 - z0 * z0,
+        );
     }
 }

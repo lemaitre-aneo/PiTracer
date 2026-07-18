@@ -1,6 +1,7 @@
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::{GeometryPrimitive, Hit, UnitVector, Vector, select};
+use crate::{GeometryPrimitive, Hit, Onb, UnitVector, Vector, select};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -11,34 +12,23 @@ pub struct Sphere {
 
 impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
     fn hit(&self, origin: Vector, direction: UnitVector, _rng: &mut R) -> Option<f32> {
-        let oc = self.position - origin;
-        let a = direction.norm2();
-        let h = direction.dot(oc);
-        let c = oc.norm2() - self.radius * self.radius;
-
-        let delta = h * h - a * c;
-        let sqrtd = delta.sqrt();
-
-        if delta < 0f32 {
-            None
-        } else if h > sqrtd {
-            Some((h - sqrtd) / a)
-        } else {
-            Some((h + sqrtd) / a)
-        }
+        self.hit(origin, direction)
     }
 
     fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit {
         let radius2 = self.radius * self.radius;
         let mut point = origin + distance * direction;
         let outward_normal = (point - self.position).normalized();
-        let front = (origin - self.position).norm2() >= radius2;
+        // The face is decided by the crossing direction at the hit point:
+        // robust when the ray originates on the surface itself, where an
+        // origin-inside-or-outside test is at the mercy of rounding.
+        let front = direction.dot(outward_normal) < 0f32;
 
         // Due to numeric imprecisions, the intersection point might be within the sphere
         // In that case, force the intersection to be on the sphere
         let distance_to_center = (point - self.position).norm2();
         let diff = distance_to_center - radius2;
-        if (front && diff < 0f32) || (!front && diff > 0f32) {
+        if diff < 0f32 {
             point = self.position + outward_normal * self.radius;
         }
         let normal = select(front, outward_normal, -outward_normal);
@@ -51,5 +41,397 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
             v: point.y,
             distance,
         }
+    }
+
+    fn target_random(&self, origin: Vector, rng: &mut R) -> UnitVector {
+        let direction = self.position - origin;
+        let sint2 = self.radius * self.radius / direction.norm2();
+
+        if sint2 >= 1f32 {
+            return UnitVector::random(rng);
+        }
+
+        let base = Onb::new(direction.normalized());
+
+        let r1 = rng.random::<f32>();
+        let r2 = rng.random::<f32>();
+        let z = 1f32 + r2 * ((1f32 - sint2).sqrt() - 1f32);
+
+        let phi = 2f32 * std::f32::consts::PI * r1;
+        let x = phi.cos() * (1f32 - z * z).sqrt();
+        let y = phi.sin() * (1f32 - z * z).sqrt();
+
+        base.transform(Vector { x, y, z }).normalized()
+    }
+    fn target_pdf(&self, origin: Vector, scattered: UnitVector) -> f32 {
+        self.target_pdf(origin, scattered)
+    }
+}
+
+impl Sphere {
+    fn hit(&self, origin: Vector, direction: UnitVector) -> Option<f32> {
+        let oc = self.position - origin;
+        let a = direction.norm2();
+        let h = direction.dot(oc);
+        let c = oc.norm2() - self.radius * self.radius;
+
+        let delta = h * h - a * c;
+        if delta < 0f32 {
+            return None;
+        }
+        let sqrtd = delta.sqrt();
+
+        // Smallest root beyond the self-intersection guard: a ray leaving the
+        // surface into the sphere must report the far root (the chord), and a
+        // sphere entirely behind the ray must report nothing.
+        let near = (h - sqrtd) / a;
+        if near > crate::HIT_EPSILON {
+            return Some(near);
+        }
+        let far = (h + sqrtd) / a;
+        if far > crate::HIT_EPSILON {
+            return Some(far);
+        }
+        None
+    }
+
+    fn target_pdf(&self, origin: Vector, scattered: UnitVector) -> f32 {
+        let direction = self.position - origin;
+        let sint2 = self.radius * self.radius / direction.norm2();
+
+        if sint2 >= 1f32 {
+            return 1f32 / (4f32 * std::f32::consts::PI);
+        }
+
+        if self.hit(origin, scattered).is_none() {
+            return 0f32;
+        }
+
+        let cost_max = (1f32 - sint2).sqrt();
+
+        1f32 / (2f32 * std::f32::consts::PI * (1f32 - cost_max))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use rand::{RngCore, SeedableRng};
+
+    use super::*;
+    #[test]
+    fn random() {
+        let sphere = Sphere {
+            radius: 1f32,
+            position: Vector {
+                x: 1f32,
+                y: 2f32,
+                z: 3f32,
+            },
+        };
+        let origin = Vector::<f32>::default();
+
+        let mut rng = rand::rngs::SmallRng::from_seed(Default::default());
+
+        for _ in 0..100 {
+            let direction = sphere.target_random(origin, &mut rng);
+            assert!(sphere.hit(origin, direction).is_some());
+            let pdf = sphere.target_pdf(origin, direction);
+            eprintln!("{direction:?} -> {pdf:?}");
+            assert!(pdf > 0f32);
+        }
+
+        assert_eq!(sphere.target_pdf(origin, UnitVector::X), 0f32);
+        assert_eq!(sphere.target_pdf(origin, UnitVector::Y), 0f32);
+        assert_eq!(sphere.target_pdf(origin, UnitVector::Z), 0f32);
+    }
+
+    #[test]
+    fn hit() {
+        let sphere = Sphere {
+            radius: 1f32,
+            position: Vector {
+                x: 1f32,
+                y: 2f32,
+                z: 3f32,
+            },
+        };
+
+        let origin = Vector {
+            x: 0f32,
+            y: 1f32,
+            z: 2f32,
+        };
+        let direction = Vector::splat(1f32).normalized();
+
+        let distance = sphere.hit(origin, direction).expect("Must hit");
+        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, distance);
+
+        eprintln!("{hit:?}");
+    }
+
+    use crate::test_utils::{
+        Stats, assert_close, assert_sampler_matches_pdf, assert_stat_close, assert_vec_close,
+        at_angle, chi2_directions, rng, sampler_mean, seeds, sphere_integral,
+    };
+
+    fn sphere_at(position: (f32, f32, f32), radius: f32) -> Sphere {
+        Sphere {
+            radius,
+            position: position.into(),
+        }
+    }
+
+    /// Analytic ray–sphere ground truth: with proj = (C−O)·d̂ and impact
+    /// parameter b (b² = |C−O|² − proj²), a forward hit exists iff b ≤ r,
+    /// at t = proj − √(r²−b²) from outside and t = proj + √(r²−b²) from inside.
+    #[test]
+    fn hit_distances_analytic() {
+        let origin = Vector::default();
+        let z = UnitVector::Z;
+
+        // head-on from outside: t = distance − radius
+        let t = sphere_at((0f32, 0f32, 5f32), 2f32)
+            .hit(origin, z)
+            .expect("must hit");
+        assert_close(t, 3f32, 1e-6);
+
+        // offset b = 1, proj = 5: t = 5 − √3
+        let t = sphere_at((0f32, 1f32, 5f32), 2f32)
+            .hit(origin, z)
+            .expect("must hit");
+        assert_close(t, 5f32 - 3f32.sqrt(), 1e-6);
+
+        // from the center: t = r in any direction
+        let sphere = sphere_at((1f32, 2f32, 3f32), 2f32);
+        for direction in [
+            UnitVector::X,
+            UnitVector::Y,
+            Vector::splat(-1f32).normalized(),
+        ] {
+            let t = sphere.hit(sphere.position, direction).expect("must hit");
+            assert_close(t, 2f32, 1e-6);
+        }
+
+        // from inside: exit at t = proj + √(r²−b²)
+        let t = sphere_at((0f32, 0f32, 5f32), 2f32)
+            .hit(Vector::from((0f32, 0f32, 4f32)), z)
+            .expect("must hit");
+        assert_close(t, 3f32, 1e-6);
+
+        // miss: b = 3 > r = 2
+        assert_eq!(sphere_at((0f32, 3f32, 5f32), 2f32).hit(origin, z), None);
+
+        // sphere behind the ray: no positive phantom distance may be reported
+        let t = sphere_at((0f32, 0f32, -5f32), 2f32).hit(origin, z);
+        assert!(t.is_none_or(|t| t <= 0f32), "phantom forward hit at {t:?}");
+
+        // near-tangent: inside graze hits, outside graze misses
+        let b = 2f32 * (1f32 - 1e-6);
+        let t = sphere_at((0f32, b, 5f32), 2f32)
+            .hit(origin, z)
+            .expect("must hit");
+        assert!(t > 0f32);
+        let b = 2f32 * (1f32 + 1e-6);
+        assert_eq!(sphere_at((0f32, b, 5f32), 2f32).hit(origin, z), None);
+    }
+
+    /// Pins the hit convention every material relies on: the normal always
+    /// opposes the incident ray; `front` means the origin was outside.
+    #[test]
+    fn to_hit_normal_orientation() {
+        let sphere = sphere_at((0f32, 0f32, 5f32), 2f32);
+        let direction = UnitVector::Z;
+
+        // from outside
+        let origin = Vector::default();
+        let t = sphere.hit(origin, direction).expect("must hit");
+        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, t);
+        assert!(hit.front);
+        assert_vec_close(hit.point, Vector::from((0f32, 0f32, 3f32)), 1e-6);
+        assert_vec_close(
+            Vector::from(hit.normal),
+            Vector::from((0f32, 0f32, -1f32)),
+            1e-6,
+        );
+        assert!(hit.normal.dot(direction) < 0f32);
+        assert_close((hit.point - sphere.position).norm(), 2f32, 1e-5);
+        assert_close(hit.distance, t, 1e-6);
+
+        // from inside: back face, normal flipped inward, still opposing
+        let origin = Vector::from((0f32, 0f32, 4f32));
+        let t = sphere.hit(origin, direction).expect("must hit");
+        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, t);
+        assert!(!hit.front);
+        assert_vec_close(hit.point, Vector::from((0f32, 0f32, 7f32)), 1e-6);
+        assert_vec_close(
+            Vector::from(hit.normal),
+            Vector::from((0f32, 0f32, -1f32)),
+            1e-6,
+        );
+        assert!(hit.normal.dot(direction) < 0f32);
+    }
+
+    /// Sampling the sphere by solid angle from outside is uniform over the
+    /// cone with cos θ_max = √(1 − r²/d²): pdf = 1/(2π(1 − cos θ_max)) inside
+    /// the cone, 0 outside.
+    #[test]
+    fn target_pdf_closed_form_in_cone() {
+        let sphere = sphere_at((1f32, 2f32, 3f32), 1f32);
+        let origin = Vector::default();
+        let axis = sphere.position.normalized();
+        let cos_max = (13f64 / 14f64).sqrt();
+        let theta_max = cos_max.acos();
+        let expected = 1f64 / (2f64 * std::f64::consts::PI * (1f64 - cos_max));
+
+        assert_close(sphere.target_pdf(origin, axis), expected, 1e-6);
+        assert_close(
+            sphere.target_pdf(origin, at_angle(axis, 0.5f64 * theta_max)),
+            expected,
+            1e-5,
+        );
+        assert_eq!(
+            sphere.target_pdf(origin, at_angle(axis, 1.01f64 * theta_max)),
+            0f32
+        );
+    }
+
+    /// Uniform-in-cone means z := ω·axis is uniform on [cos θ_max, 1]:
+    /// E[z] = (1+c)/2, E[z²] = (1+c+c²)/3; every sample hits the sphere.
+    #[test]
+    fn target_random_within_cone_moments() {
+        let sphere = sphere_at((1f32, 2f32, 3f32), 1f32);
+        let origin = Vector::default();
+        let axis = sphere.position.normalized();
+        let c = (13f64 / 14f64).sqrt();
+
+        for seed in seeds() {
+            let mut rng = rng(seed);
+            let mut stats = [Stats::new(); 2];
+            for _ in 0..100_000 {
+                let w = sphere.target_random(origin, &mut rng);
+                let z = w.dot(axis);
+                assert!(f64::from(z) >= c - 1e-5, "sample outside the cone: z = {z}");
+                assert!(
+                    sphere.hit(origin, w).is_some(),
+                    "sample misses the sphere: {w:?}"
+                );
+                stats[0].push(z);
+                stats[1].push(z * z);
+            }
+            assert_stat_close(
+                stats[0].mean(),
+                stats[0].se(),
+                (1f64 + c) / 2f64,
+                4f32,
+                0f32,
+            );
+            assert_stat_close(
+                stats[1].mean(),
+                stats[1].se(),
+                (1f64 + c + c * c) / 3f64,
+                4f32,
+                0f32,
+            );
+        }
+    }
+
+    /// target_random must be distributed according to target_pdf (wide cone
+    /// so the goodness-of-fit bins fill: r = 1, d = 1.25 ⇒ c = 0.6 exactly).
+    #[test]
+    fn target_sampler_matches_target_pdf() {
+        let sphere = sphere_at((0f32, 0f32, 1.25f32), 1f32);
+        let origin = Vector::default();
+        let axis = UnitVector::Z;
+        let c = 0.6f64;
+
+        let mut rng = rng(seeds()[0]);
+        assert_sampler_matches_pdf(
+            100_000,
+            1_000_000,
+            &mut rng,
+            axis,
+            |rng| sphere.target_random(origin, rng),
+            |w| sphere.target_pdf(origin, w),
+        );
+
+        chi2_directions(
+            50_000,
+            &mut rng,
+            axis,
+            c,
+            10,
+            10,
+            |rng| sphere.target_random(origin, rng),
+            |z0, z1| (z1 - z0) / (1f64 - c),
+        );
+    }
+
+    /// ∫ target_pdf dω = 1 over the sphere of directions.
+    #[test]
+    fn target_pdf_normalizes() {
+        let sphere = sphere_at((0f32, 0f32, 1.5f32), 1f32);
+        let origin = Vector::default();
+
+        let mut rng = rng(seeds()[1]);
+        let (integral, se) = sphere_integral(1_000_000, &mut rng, |w| sphere.target_pdf(origin, w));
+        assert_stat_close(integral, se, 1f32, 4f32, 0f32);
+    }
+
+    /// From inside the sphere every direction hits it: the only consistent
+    /// strategy is uniform over the full sphere, pdf = 1/4π everywhere.
+    #[test]
+    fn target_inside_sphere_uniform() {
+        let sphere = sphere_at((1f32, 0f32, 0f32), 2f32);
+        let origin = Vector::default();
+        let expected = 1f32 / (4f32 * std::f32::consts::PI);
+
+        let mut rng = rng(seeds()[2]);
+        for _ in 0..100 {
+            assert_close(
+                sphere.target_pdf(origin, UnitVector::random(&mut rng)),
+                expected,
+                1e-6,
+            );
+        }
+
+        let (mean, se) = sampler_mean(
+            100_000,
+            &mut rng,
+            |rng| sphere.target_random(origin, rng),
+            |w| w.dot(UnitVector::X),
+        );
+        assert_stat_close(mean, se, 0f32, 4f32, 0f32);
+
+        chi2_directions(
+            50_000,
+            &mut rng,
+            UnitVector::Z,
+            -1f64,
+            10,
+            10,
+            |rng| sphere.target_random(origin, rng),
+            |z0, z1| (z1 - z0) / 2.0,
+        );
+    }
+
+    /// Heavy tier: cone sampler goodness-of-fit at 10× samples, finer grid.
+    #[test]
+    #[ignore = "heavy convergence tier"]
+    fn heavy_chi2_target_sampler() {
+        let sphere = sphere_at((0f32, 0f32, 1.25f32), 1f32);
+        let origin = Vector::default();
+        let c = 0.6f64;
+
+        let mut rng = rng(seeds()[2]);
+        chi2_directions(
+            1_000_000,
+            &mut rng,
+            UnitVector::Z,
+            c,
+            20,
+            20,
+            |rng| sphere.target_random(origin, rng),
+            |z0, z1| (z1 - z0) / (1f64 - c),
+        );
     }
 }

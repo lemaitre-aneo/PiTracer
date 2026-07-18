@@ -13,6 +13,10 @@ pub use metal::*;
 
 pub trait Material<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
     fn scatter(&self, direction: UnitVector, hit: Hit, rng: &mut R) -> Option<UnitVector>;
+    fn pdf(&self, direction: UnitVector, hit: Hit, scattered: UnitVector) -> f32 {
+        _ = (direction, hit, scattered);
+        0f32
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -35,6 +39,18 @@ impl<R: crate::Rng + ?Sized> Material<R> for MaterialEnum {
             MaterialEnum::Lambertian(lambertian) => lambertian.scatter(direction, hit, rng),
             MaterialEnum::Metal(metal) => metal.scatter(direction, hit, rng),
             MaterialEnum::Dielectric(dielectric) => dielectric.scatter(direction, hit, rng),
+        }
+    }
+
+    fn pdf(&self, direction: UnitVector, hit: Hit, scattered: UnitVector) -> f32 {
+        match self {
+            MaterialEnum::Lambertian(lambertian) => {
+                Material::<R>::pdf(lambertian, direction, hit, scattered)
+            }
+            MaterialEnum::Metal(metal) => Material::<R>::pdf(metal, direction, hit, scattered),
+            MaterialEnum::Dielectric(dielectric) => {
+                Material::<R>::pdf(dielectric, direction, hit, scattered)
+            }
         }
     }
 }

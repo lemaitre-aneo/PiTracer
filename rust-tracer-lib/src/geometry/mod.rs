@@ -6,10 +6,21 @@ mod sphere;
 
 pub use sphere::*;
 
-pub(crate) trait GeometryPrimitive<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
+pub(crate) trait GeometryPrimitive<R: crate::Rng + ?Sized = dyn RngCore>:
+    std::fmt::Debug
+{
     fn hit(&self, origin: Vector, direction: UnitVector, rng: &mut R) -> Option<f32>;
 
     fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit;
+
+    fn target_random(&self, origin: Vector, rng: &mut R) -> UnitVector {
+        _ = (origin, rng);
+        UnitVector::default()
+    }
+    fn target_pdf(&self, origin: Vector, scattered: UnitVector) -> f32 {
+        _ = (origin, scattered);
+        0.0
+    }
 }
 
 pub trait Geometry<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
@@ -21,6 +32,15 @@ pub trait Geometry<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
     ) -> Option<(f32, &'a dyn HitCaster<R>)>;
 
     fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit;
+
+    fn target_random(&self, origin: Vector, rng: &mut R) -> UnitVector {
+        _ = (origin, rng);
+        UnitVector::default()
+    }
+    fn target_pdf(&self, origin: Vector, scattered: UnitVector) -> f32 {
+        _ = (origin, scattered);
+        0.0
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -33,7 +53,7 @@ pub struct Hit {
     pub distance: f32,
 }
 
-pub trait HitCaster<R: crate::Rng + ?Sized = dyn RngCore> {
+pub trait HitCaster<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
     fn as_geometry(&self) -> &dyn Geometry<R>;
     fn as_material<'a>(&'a self, default: &'a dyn Material<R>) -> &'a dyn Material<R> {
         default
@@ -56,6 +76,13 @@ impl<R: crate::Rng + ?Sized, G: GeometryPrimitive<R>> Geometry<R> for G {
 
     fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit {
         self.to_hit(origin, direction, distance)
+    }
+
+    fn target_random(&self, origin: Vector, rng: &mut R) -> UnitVector {
+        self.target_random(origin, rng)
+    }
+    fn target_pdf(&self, origin: Vector, scattered: UnitVector) -> f32 {
+        self.target_pdf(origin, scattered)
     }
 }
 

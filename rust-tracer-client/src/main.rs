@@ -24,7 +24,6 @@ pub struct Cli {
     pub wait: f64,
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), eyre::Report> {
     tracing_subscriber::registry()

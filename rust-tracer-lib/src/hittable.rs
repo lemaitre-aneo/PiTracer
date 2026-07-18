@@ -6,11 +6,14 @@ use crate::{
 };
 
 pub trait Hittable<R: crate::Rng + ?Sized = dyn RngCore>:
-    Geometry<R> + Material<R> + Texture<R>
+    Geometry<R> + Material<R> + Texture<R> + std::fmt::Debug
 {
 }
 
-impl<R: crate::Rng + ?Sized, H: Geometry<R> + Material<R> + Texture<R> + ?Sized> Hittable<R> for H {}
+impl<R: crate::Rng + ?Sized, H: Geometry<R> + Material<R> + Texture<R> + std::fmt::Debug + ?Sized>
+    Hittable<R> for H
+{
+}
 
 pub struct Radiance {
     pub emission: Color,
@@ -53,6 +56,14 @@ impl<G: Geometry, M: std::fmt::Debug, T: std::fmt::Debug> Geometry for Object<G,
     fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit {
         self.geometry.to_hit(origin, direction, distance)
     }
+
+    fn target_random(&self, origin: Vector, rng: &mut (dyn RngCore + 'static)) -> UnitVector {
+        self.geometry.target_random(origin, rng)
+    }
+
+    fn target_pdf(&self, origin: Vector, scattered: UnitVector) -> f32 {
+        self.geometry.target_pdf(origin, scattered)
+    }
 }
 
 impl<R: crate::Rng + ?Sized, G: std::fmt::Debug, M: Material<R>, T: std::fmt::Debug> Material<R>
@@ -60,6 +71,10 @@ impl<R: crate::Rng + ?Sized, G: std::fmt::Debug, M: Material<R>, T: std::fmt::De
 {
     fn scatter(&self, direction: UnitVector, hit: Hit, rng: &mut R) -> Option<UnitVector> {
         self.material.scatter(direction, hit, rng)
+    }
+
+    fn pdf(&self, direction: UnitVector, hit: Hit, scattered: UnitVector) -> f32 {
+        self.material.pdf(direction, hit, scattered)
     }
 }
 
