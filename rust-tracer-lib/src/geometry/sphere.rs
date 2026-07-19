@@ -55,11 +55,16 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
 
         let r1 = rng.random::<f32>();
         let r2 = rng.random::<f32>();
-        let z = 1f32 + r2 * ((1f32 - sint2).sqrt() - 1f32);
+        // 1 − z is uniform on [0, 1 − cos θ_max]; keeping it as its own
+        // variable sidesteps the cancellations in z − 1 and 1 − z²
+        // (= u·(2 − u)) that erased small cones in f32.
+        let u = r2 * Self::one_minus_cos_max(sint2);
+        let z = 1f32 - u;
+        let sin_theta = (u * (2f32 - u)).sqrt();
 
         let phi = 2f32 * std::f32::consts::PI * r1;
-        let x = phi.cos() * (1f32 - z * z).sqrt();
-        let y = phi.sin() * (1f32 - z * z).sqrt();
+        let x = phi.cos() * sin_theta;
+        let y = phi.sin() * sin_theta;
 
         base.transform(Vector { x, y, z }).normalized()
     }
@@ -69,6 +74,15 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
 }
 
 impl Sphere {
+    /// 1 − cos θ_max of the tangent cone, from sin²θ_max = r²/d². The naive
+    /// `1 − √(1−sint2)` cancels in f32 for small angular radii (−7% at
+    /// r/d ≈ 1e-3, 0 below ~1.7e-4, where the pdf explodes to +inf and the
+    /// sampler collapses onto the axis); this algebraically equal form keeps
+    /// full relative precision at every scale.
+    fn one_minus_cos_max(sint2: f32) -> f32 {
+        sint2 / (1f32 + (1f32 - sint2).sqrt())
+    }
+
     fn hit(&self, origin: Vector, direction: UnitVector) -> Option<f32> {
         let oc = self.position - origin;
         let a = direction.norm2();
@@ -107,9 +121,7 @@ impl Sphere {
             return 0f32;
         }
 
-        let cost_max = (1f32 - sint2).sqrt();
-
-        1f32 / (2f32 * std::f32::consts::PI * (1f32 - cost_max))
+        1f32 / (2f32 * std::f32::consts::PI * Self::one_minus_cos_max(sint2))
     }
 }
 
@@ -375,6 +387,69 @@ mod test {
         let mut rng = rng(seeds()[1]);
         let (integral, se) = sphere_integral(1_000_000, &mut rng, |w| sphere.target_pdf(origin, w));
         assert_stat_close(integral, se, 1f32, 4f32, 0f32);
+    }
+
+    /// target_pdf must track the f64 ground truth at every angular radius:
+    /// the naive `1 − √(1−sint²)` denominator cancels in f32 (−7% at
+    /// r/d ≈ 1e-3, +inf below ~1.7e-4, where the light silently vanished
+    /// from diffuse lighting).
+    #[test]
+    fn target_pdf_exact_at_small_angular_radius() {
+        for d in [2f32, 10f32, 1e3f32, 1e4f32, 1e6f32] {
+            let sphere = sphere_at((0f32, 0f32, d), 1f32);
+            let pdf = sphere.target_pdf(Vector::default(), UnitVector::Z);
+
+            // f64 reference through the same stable algebra: the naive f64
+            // form loses digits itself by d = 1e6.
+            let sint2 = 1f64 / (f64::from(d) * f64::from(d));
+            let omc = sint2 / (1f64 + (1f64 - sint2).sqrt());
+            let expected = 1f64 / (2f64 * std::f64::consts::PI * omc);
+
+            assert_close(pdf, expected, 1e-5);
+        }
+    }
+
+    /// Below the old cancellation threshold (angular radius 1e-4) the sampler
+    /// must still spread over the tangent cone instead of collapsing onto the
+    /// axis. At this scale z rounds to exactly 1.0 in f32, so the spread is
+    /// measured on the transverse components, which keep full relative
+    /// precision: sin²θ = (1−z)(1+z) with 1−z uniform on [0, omc] gives
+    /// E[sin²θ] = omc·(1 − omc/3) and max sin²θ = omc·(2 − omc) = sin²θ_max
+    /// exactly.
+    #[test]
+    fn target_random_small_cone_spread() {
+        let sphere = sphere_at((0f32, 0f32, 1e4f32), 1f32);
+        let origin = Vector::default();
+        let sint2 = 1e-8f64;
+        let omc = sint2 / (1f64 + (1f64 - sint2).sqrt());
+
+        let mut rng = rng(seeds()[0]);
+        let mut stats = Stats::new();
+        for _ in 0..100_000 {
+            let direction = sphere.target_random(origin, &mut rng);
+            let w = Vector::from(direction);
+            let t2 = f64::from(w.x) * f64::from(w.x) + f64::from(w.y) * f64::from(w.y);
+            assert!(
+                t2 <= sint2 * (1f64 + 1e-5),
+                "sample outside the cone: sin²θ = {t2:e}"
+            );
+            // clearly-interior samples must reach the sphere (guards a wrong
+            // aim axis or hemisphere; edge samples may graze-miss by rounding)
+            if t2 < sint2 * 0.999 {
+                assert!(
+                    sphere.hit(origin, direction).is_some(),
+                    "interior sample misses the sphere: {w:?}"
+                );
+            }
+            stats.push(t2);
+        }
+        assert_stat_close(
+            stats.mean(),
+            stats.se(),
+            omc * (1f64 - omc / 3f64),
+            4f32,
+            0f32,
+        );
     }
 
     /// From inside the sphere every direction hits it: the only consistent
