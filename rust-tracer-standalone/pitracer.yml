@@ -28,7 +28,11 @@ objects:
   - type: sphere
     radius: 10
     position: [15, 45, 112]
-    color: [.999, .999, .999]
+    texture: marble
+    color: [.9, .9, .9]
+    vein_color: [.3, .25, .35]
+    scale: 0.8 #1.2
+    turbulence: 5
   - type: sphere
     radius: 15
     position: [16, 16, 130]

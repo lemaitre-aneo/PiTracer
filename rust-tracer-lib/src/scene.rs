@@ -4,15 +4,15 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Camera, CameraDefinition, Color, Flat, Geometry, GeometryEnum, HitCaster, Hittable,
-    MaterialEnum, Object, TextureProperty, UnitVector, Vector,
+    Camera, CameraDefinition, Color, Geometry, GeometryEnum, HitCaster, Hittable, MaterialEnum,
+    Object, Texture, TextureEnum, TextureProperty, UnitVector, Vector,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SceneDefinition {
     pub camera: CameraDefinition,
-    pub objects: Vec<Object<GeometryEnum, MaterialEnum, Flat>>,
+    pub objects: Vec<Object<GeometryEnum, MaterialEnum, TextureEnum>>,
     pub recursion_depth: u32,
     pub samples: u32,
     pub gamma: f32,
@@ -50,14 +50,14 @@ impl Default for Scene {
     }
 }
 
-/// Monomorphizes one scene object (any geometry, the material still a
-/// definition-side enum) into a hittable trait object, paired with its
-/// light-sampling weight |emission|².
-fn build_hittable<G: Geometry + Send + Sync + 'static>(
-    object: Object<G, MaterialEnum, Flat>,
-) -> (Arc<dyn Hittable + Send + Sync>, f32) {
-    let w = object.texture.emission.norm2();
-    let h = match object.material {
+/// Monomorphizes one scene object (geometry and texture already concrete,
+/// the material still a definition-side enum) into a hittable trait object.
+fn build_hittable<G, T>(object: Object<G, MaterialEnum, T>) -> Arc<dyn Hittable + Send + Sync>
+where
+    G: Geometry + Send + Sync + 'static,
+    T: Texture + Send + Sync + 'static,
+{
+    match object.material {
         MaterialEnum::Lambertian(lambertian) => {
             Arc::new(Object::new(object.geometry, lambertian, object.texture))
                 as Arc<dyn Hittable + Send + Sync>
@@ -68,26 +68,42 @@ fn build_hittable<G: Geometry + Send + Sync + 'static>(
             Arc::new(Object::new(object.geometry, dielectric, object.texture))
                 as Arc<dyn Hittable + Send + Sync>
         }
-    };
-    (h, w)
+    }
 }
 
-/// Peels the geometry tag off a definition object so `build_hittable` can
-/// monomorphize the full geometry × material product.
-fn build_object(
-    object: Object<GeometryEnum, MaterialEnum, Flat>,
-) -> (Arc<dyn Hittable + Send + Sync>, f32) {
-    match object.geometry {
-        GeometryEnum::Sphere(sphere) => {
-            build_hittable(Object::new(sphere, object.material, object.texture))
+/// Peels the texture tag off so `build_hittable` sees a concrete texture.
+fn build_textured<G: Geometry + Send + Sync + 'static>(
+    object: Object<G, MaterialEnum, TextureEnum>,
+) -> Arc<dyn Hittable + Send + Sync> {
+    match object.texture {
+        TextureEnum::Flat(flat) => {
+            build_hittable(Object::new(object.geometry, object.material, flat))
         }
-        GeometryEnum::Quad(quad) => {
-            build_hittable(Object::new(quad, object.material, object.texture))
-        }
-        GeometryEnum::Ellipse(ellipse) => {
-            build_hittable(Object::new(ellipse, object.material, object.texture))
+        TextureEnum::Marble(marble) => {
+            build_hittable(Object::new(object.geometry, object.material, marble))
         }
     }
+}
+
+/// Peels the geometry tag off a definition object so the chain below can
+/// monomorphize the full geometry × texture × material product, and pairs the
+/// result with its light-sampling weight |emission|².
+fn build_object(
+    object: Object<GeometryEnum, MaterialEnum, TextureEnum>,
+) -> (Arc<dyn Hittable + Send + Sync>, f32) {
+    let w = object.texture.emission().norm2();
+    let h = match object.geometry {
+        GeometryEnum::Sphere(sphere) => {
+            build_textured(Object::new(sphere, object.material, object.texture))
+        }
+        GeometryEnum::Quad(quad) => {
+            build_textured(Object::new(quad, object.material, object.texture))
+        }
+        GeometryEnum::Ellipse(ellipse) => {
+            build_textured(Object::new(ellipse, object.material, object.texture))
+        }
+    };
+    (h, w)
 }
 
 impl From<SceneDefinition> for Scene {
@@ -311,7 +327,7 @@ impl Scene {
 mod test {
     use super::*;
     use crate::test_utils::{Stats, assert_close, assert_stat_close, rng, seeds};
-    use crate::{Ellipse, Lambertian, Metal, Quad, Sphere, Vector};
+    use crate::{Ellipse, Flat, Lambertian, Marble, Metal, Quad, Sphere, Vector};
 
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 4;
@@ -321,17 +337,17 @@ mod test {
         radius: f32,
         color: (f32, f32, f32),
         emission: (f32, f32, f32),
-    ) -> Object<GeometryEnum, MaterialEnum, Flat> {
+    ) -> Object<GeometryEnum, MaterialEnum, TextureEnum> {
         Object::new(
             GeometryEnum::Sphere(Sphere {
                 radius,
                 position: position.into(),
             }),
             MaterialEnum::Lambertian(Lambertian {}),
-            Flat {
+            TextureEnum::Flat(Flat {
                 color: color.into(),
                 emission: emission.into(),
-            },
+            }),
         )
     }
 
@@ -341,14 +357,14 @@ mod test {
         v: (f32, f32, f32),
         color: (f32, f32, f32),
         emission: (f32, f32, f32),
-    ) -> Object<GeometryEnum, MaterialEnum, Flat> {
+    ) -> Object<GeometryEnum, MaterialEnum, TextureEnum> {
         Object::new(
             GeometryEnum::Quad(Quad::new(position.into(), u.into(), v.into())),
             MaterialEnum::Lambertian(Lambertian {}),
-            Flat {
+            TextureEnum::Flat(Flat {
                 color: color.into(),
                 emission: emission.into(),
-            },
+            }),
         )
     }
 
@@ -358,21 +374,21 @@ mod test {
         v: (f32, f32, f32),
         color: (f32, f32, f32),
         emission: (f32, f32, f32),
-    ) -> Object<GeometryEnum, MaterialEnum, Flat> {
+    ) -> Object<GeometryEnum, MaterialEnum, TextureEnum> {
         Object::new(
             GeometryEnum::Ellipse(Ellipse::new(position.into(), u.into(), v.into())),
             MaterialEnum::Lambertian(Lambertian {}),
-            Flat {
+            TextureEnum::Flat(Flat {
                 color: color.into(),
                 emission: emission.into(),
-            },
+            }),
         )
     }
 
     fn scene(
         camera_origin: (f32, f32, f32),
         camera_direction: (f32, f32, f32),
-        objects: Vec<Object<GeometryEnum, MaterialEnum, Flat>>,
+        objects: Vec<Object<GeometryEnum, MaterialEnum, TextureEnum>>,
         recursion_depth: u32,
         light_sampling: bool,
     ) -> Scene {
@@ -909,10 +925,10 @@ mod test {
                             position: Vector::default(),
                         }),
                         MaterialEnum::Metal(Metal { fuzziness: 0f32 }),
-                        Flat {
+                        TextureEnum::Flat(Flat {
                             color: (0.9f32, 0.9f32, 0.9f32).into(),
                             emission: Color::default(),
-                        },
+                        }),
                     ),
                     // emissive dome enclosing the whole scene
                     lambertian(
@@ -1092,6 +1108,46 @@ mod test {
         let stats = sample_center(&direct_light_scene(true), 1_000_000, seeds()[0]);
         for stats in stats {
             assert_stat_close(stats.mean(), stats.se(), 0.15f32, 4f32, 6e-5f32);
+        }
+    }
+
+    /// End-to-end smoke test of the texture monomorphization: a marble
+    /// Lambertian sphere inside an emissive dome renders finite radiance,
+    /// bounded by the dome emission (marble attenuation < 1 everywhere).
+    #[test]
+    fn marble_sphere_renders_finite() {
+        for light_sampling in [false, true] {
+            let scene = scene(
+                (0f32, 0f32, -5f32),
+                (0f32, 0f32, 1f32),
+                vec![
+                    Object::new(
+                        GeometryEnum::Sphere(Sphere {
+                            radius: 1f32,
+                            position: Vector::default(),
+                        }),
+                        MaterialEnum::Lambertian(Lambertian {}),
+                        TextureEnum::Marble(Marble::default()),
+                    ),
+                    // emissive dome enclosing the whole scene
+                    lambertian(
+                        (0f32, 0f32, 0f32),
+                        100f32,
+                        (0f32, 0f32, 0f32),
+                        (1f32, 1f32, 1f32),
+                    ),
+                ],
+                10,
+                light_sampling,
+            );
+            let stats = sample_center(&scene, 1_000, seeds()[0]);
+            for stats in stats {
+                assert!(
+                    stats.mean() > 0f64 && stats.mean() < 1f64,
+                    "marble-lit mean {} escapes (0, E)",
+                    stats.mean(),
+                );
+            }
         }
     }
 

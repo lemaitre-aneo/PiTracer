@@ -292,8 +292,8 @@ mod test {
     /// The shipped scene must survive the whole deserialization stack (config
     /// crate → serde flatten → the `type` tag → the geometry definition
     /// modules): 13 objects (ellipse light + 6 ball spheres, then 6 quad
-    /// walls), and a spot-checked wall whose geometry and color arrived
-    /// intact.
+    /// walls), the marble ball's `texture:` tag, and a spot-checked wall
+    /// whose geometry and color arrived intact.
     #[test]
     fn pitracer_yaml_parses_objects() {
         let definition = config::Config::builder()
@@ -313,6 +313,11 @@ mod test {
             definition.objects[0].geometry,
             ::raytracer::GeometryEnum::Ellipse(_)
         ));
+        // the white ball carries the only `texture:` tag in the scene
+        assert!(matches!(
+            definition.objects[3].texture,
+            ::raytracer::TextureEnum::Marble(_)
+        ));
 
         let left = &definition.objects[7];
         assert_eq!(
@@ -323,7 +328,13 @@ mod test {
                 (0f32, 0f32, 310f32).into(),
             ))
         );
-        assert_eq!(left.texture.color, (0.75f32, 0.25f32, 0.25f32).into());
+        assert_eq!(
+            left.texture,
+            ::raytracer::TextureEnum::Flat(::raytracer::Flat {
+                color: (0.75f32, 0.25f32, 0.25f32).into(),
+                emission: Default::default(),
+            })
+        );
     }
 
     /// One quad entry carries geometry, material, and texture keys in a
@@ -349,7 +360,13 @@ objects:
             quad.material,
             ::raytracer::MaterialEnum::Metal(::raytracer::Metal { fuzziness: 0.25 })
         );
-        assert_eq!(quad.texture.emission, (1f32, 2f32, 3f32).into());
+        assert_eq!(
+            quad.texture,
+            ::raytracer::TextureEnum::Flat(::raytracer::Flat {
+                color: (0.1f32, 0.2f32, 0.3f32).into(),
+                emission: (1f32, 2f32, 3f32).into(),
+            })
+        );
     }
 
     /// The pre-rename `fuziness` spelling stays accepted as an alias; both
@@ -462,7 +479,13 @@ objects:
                 (0f32, 0f32, 8f32).into(),
             ))
         );
-        assert_eq!(light.texture.color, (0.1f32, 0.2f32, 0.3f32).into());
+        assert_eq!(
+            light.texture,
+            ::raytracer::TextureEnum::Flat(::raytracer::Flat {
+                color: (0.1f32, 0.2f32, 0.3f32).into(),
+                emission: Default::default(),
+            })
+        );
     }
 
     /// An object entry without a `material:` key defaults to Lambertian.
@@ -479,6 +502,65 @@ objects:
         assert_eq!(
             definition.objects[0].material,
             ::raytracer::MaterialEnum::Lambertian(::raytracer::Lambertian {})
+        );
+    }
+
+    /// A `texture: marble` entry lands in the Marble variant with its knobs
+    /// intact (lowercase tag; Title case tolerated via alias like `type:`).
+    #[test]
+    fn marble_texture_parses() {
+        for tag in ["marble", "Marble"] {
+            let definition = parse(&format!(
+                "\
+objects:
+  - type: sphere
+    radius: 10
+    position: [15, 45, 112]
+    texture: {tag}
+    color: [0.9, 0.9, 0.9]
+    vein_color: [0.3, 0.25, 0.35]
+    scale: 1.5
+    turbulence: 4
+    octaves: 3
+    seed: 7
+"
+            ))
+            .unwrap();
+            assert_eq!(
+                definition.objects[0].texture,
+                ::raytracer::TextureEnum::Marble(::raytracer::Marble {
+                    color: (0.9f32, 0.9f32, 0.9f32).into(),
+                    vein_color: (0.3f32, 0.25f32, 0.35f32).into(),
+                    scale: 1.5,
+                    turbulence: 4.0,
+                    octaves: 3,
+                    seed: 7,
+                    ..Default::default()
+                }),
+                "tag `{tag}`"
+            );
+        }
+    }
+
+    /// An object entry without a `texture:` key defaults to Flat, so plain
+    /// `color:`/`emission:` entries keep working.
+    #[test]
+    fn absent_texture_defaults_to_flat() {
+        let definition = parse(
+            "\
+objects:
+  - type: sphere
+    radius: 1
+    color: [0.1, 0.2, 0.3]
+",
+        )
+        .unwrap();
+        assert_eq!(
+            definition.objects[0].texture,
+            ::raytracer::TextureEnum::Flat(::raytracer::Flat {
+                color: (0.1f32, 0.2f32, 0.3f32).into(),
+                emission: Default::default(),
+            })
         );
     }
 

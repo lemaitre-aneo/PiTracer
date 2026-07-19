@@ -174,7 +174,7 @@ mod test {
     use super::*;
     use ::raytracer::{
         CameraDefinition, Flat, GeometryEnum, Lambertian, MaterialEnum, Object, SceneDefinition,
-        Sphere, Vector,
+        Sphere, TextureEnum, Vector,
     };
 
     /// Camera enclosed in a purely emissive sphere: every sample of every
@@ -195,10 +195,10 @@ mod test {
                     position: Vector::default(),
                 }),
                 MaterialEnum::Lambertian(Lambertian {}),
-                Flat {
+                TextureEnum::Flat(Flat {
                     color: (0f32, 0f32, 0f32).into(),
                     emission: (0.25f32, 0.5f32, 0.75f32).into(),
-                },
+                }),
             )],
             recursion_depth: 5,
             samples: 4,

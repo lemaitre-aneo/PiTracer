@@ -9,3 +9,4 @@ compute = []
 [dependencies]
 rand = "0.9"
 serde = { version = "1.0", features = ["derive"] }
+fastnoise-lite = "1"
