@@ -112,7 +112,8 @@ impl From<SceneDefinition> for Scene {
 }
 
 impl Scene {
-    /// Nearest hit along a ray, honoring the self-intersection guard.
+    /// Nearest hit along a ray (each geometry applies its own relative
+    /// self-intersection guard; see `HIT_EPSILON_REL` and `Hit::spawn`).
     fn closest_hit(
         &self,
         origin: Vector,
@@ -124,7 +125,7 @@ impl Scene {
         for (i, hittable) in self.hittables.iter().enumerate() {
             if let Some((distance, hit_caster)) = hittable.hit(origin, direction, rng)
                 && distance < closest
-                && distance > crate::HIT_EPSILON
+                && distance > 0f32
             {
                 closest = distance;
                 best = Some((hit_caster, i));
@@ -207,20 +208,22 @@ impl Scene {
                     // the balance-weighted direct term is ρ·pm/(pl + pm)·L_e.
                     let pm = material.pdf(direction, hit, light_direction);
                     let pl = self.light_pdf(hit.point, light_direction);
+                    let shadow_origin = hit.spawn(light_direction);
                     if pm > 0f32
                         && pl > 0f32
                         && let Some((direct, direct_hittable, direct_distance)) =
-                            self.closest_hit(hit.point, light_direction, rng)
+                            self.closest_hit(shadow_origin, light_direction, rng)
                     {
                         let direct_hit = direct.as_geometry().to_hit(
-                            hit.point,
+                            shadow_origin,
                             light_direction,
                             direct_distance,
                         );
-                        let direct_emission =
-                            direct.as_texture(direct_hittable).get(direct_hit, rng).emission;
-                        color.emission +=
-                            texture.attenuation * direct_emission * (pm / (pl + pm));
+                        let direct_emission = direct
+                            .as_texture(direct_hittable)
+                            .get(direct_hit, rng)
+                            .emission;
+                        color.emission += texture.attenuation * direct_emission * (pm / (pl + pm));
                     }
                 }
 
@@ -235,7 +238,7 @@ impl Scene {
 
             colors.push(color);
 
-            origin = hit.point;
+            origin = hit.spawn(scattered);
             direction = scattered;
         }
 
@@ -767,7 +770,12 @@ mod test {
                     (0f32, 0f32, 0f32),
                 ),
                 // small bright light inside
-                lambertian((0f32, 8f32, 0f32), 1f32, (0f32, 0f32, 0f32), (10f32, 10f32, 10f32)),
+                lambertian(
+                    (0f32, 8f32, 0f32),
+                    1f32,
+                    (0f32, 0f32, 0f32),
+                    (10f32, 10f32, 10f32),
+                ),
             ],
             depth,
             true,
@@ -782,20 +790,29 @@ mod test {
                 max = max.max(f64::from(value));
             }
         }
-        assert!(max <= bound, "firefly: max sample {max} exceeds the physical bound {bound}");
+        assert!(
+            max <= bound,
+            "firefly: max sample {max} exceeds the physical bound {bound}"
+        );
     }
 
     /// Heavy tier: tighter convergence bounds (β ≈ 1% on the anchor).
+    ///
+    /// `extra` absorbs the deterministic receiver displacement of ray
+    /// spawning: bounce origins sit SURFACE_OFFSET_REL·(r+|C|) = 2e-4 off the
+    /// floor, toward the light at distance ~1, biasing its solid angle by
+    /// ≤ 2·2e-4 ≈ +6e-5 on the 0.15 anchor — resolvable at 1e7 samples
+    /// (1.5σ) though invisible in the fast tier.
     #[test]
     #[ignore = "heavy convergence tier"]
     fn heavy_direct_light_convergence() {
         let stats = sample_center(&direct_light_scene(false), 10_000_000, seeds()[2]);
         for stats in stats {
-            assert_stat_close(stats.mean(), stats.se(), 0.15f32, 4f32, 0f32);
+            assert_stat_close(stats.mean(), stats.se(), 0.15f32, 4f32, 6e-5f32);
         }
         let stats = sample_center(&direct_light_scene(true), 1_000_000, seeds()[0]);
         for stats in stats {
-            assert_stat_close(stats.mean(), stats.se(), 0.15f32, 4f32, 0f32);
+            assert_stat_close(stats.mean(), stats.se(), 0.15f32, 4f32, 6e-5f32);
         }
     }
 

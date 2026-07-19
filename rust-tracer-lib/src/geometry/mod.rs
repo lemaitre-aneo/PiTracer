@@ -51,6 +51,23 @@ pub struct Hit {
     pub u: f32,
     pub v: f32,
     pub distance: f32,
+    /// How far a ray spawned at this hit must start off the surface: a few
+    /// ulps of the geometry's coordinate scale, i.e. just above the rounding
+    /// noise of `point`'s placement on the surface, and far below any
+    /// resolvable feature. Applied by [`Hit::spawn`].
+    pub offset: f32,
+}
+
+impl Hit {
+    /// Origin for a secondary ray leaving this hit: `point` pushed `offset`
+    /// off the surface toward the side `direction` travels (outside for
+    /// reflection/diffuse, inside for transmission). An origin strictly off a
+    /// convex surface cannot re-intersect it on its way out — grazing
+    /// included — which is what makes the tiny relative hit guard
+    /// ([`crate::HIT_EPSILON_REL`]) sufficient.
+    pub fn spawn(&self, direction: UnitVector) -> Vector {
+        self.point + self.offset.copysign(direction.dot(self.normal)) * self.normal
+    }
 }
 
 pub trait HitCaster<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {

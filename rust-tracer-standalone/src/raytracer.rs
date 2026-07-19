@@ -111,7 +111,10 @@ fn render_row(
 
 /// Converts a radiance row to tight RGB24 bytes.
 fn convert_row(scene: &Scene, accumulator: &[f32]) -> Vec<u8> {
-    accumulator.iter().map(|&value| scene.to_u8(value)).collect()
+    accumulator
+        .iter()
+        .map(|&value| scene.to_u8(value))
+        .collect()
 }
 
 /// Body of the render thread: loops full-image iterations until stopped,
@@ -142,13 +145,15 @@ pub fn render_thread(scene: Scene, control: Arc<Control>, sender: EventSender) {
             .enumerate()
             .par_bridge()
             .for_each(|(y, accumulator)| {
-                let mut rng =
-                    SmallRng::seed_from_u64(seed_base ^ ((iter as u64) << 32) ^ y as u64);
+                let mut rng = SmallRng::seed_from_u64(seed_base ^ ((iter as u64) << 32) ^ y as u64);
                 if render_row(&scene, y, iter, accumulator, &control, &mut rng) {
                     let pixels = convert_row(&scene, accumulator);
                     // A full queue only costs a stale row until the next
                     // iteration repaints it.
-                    if sender.push_custom_event(ViewerEvent::Row { y, pixels }).is_err() {
+                    if sender
+                        .push_custom_event(ViewerEvent::Row { y, pixels })
+                        .is_err()
+                    {
                         tracing::debug!("dropped row {y} (event queue full or shutting down)");
                     }
                 }
@@ -158,7 +163,9 @@ pub fn render_thread(scene: Scene, control: Arc<Control>, sender: EventSender) {
             break;
         }
         tracing::info!("iteration #{iter}: finished in {:#?}", started.elapsed());
-        sender.push_custom_event(ViewerEvent::IterationDone { iter }).ok();
+        sender
+            .push_custom_event(ViewerEvent::IterationDone { iter })
+            .ok();
     }
 }
 
@@ -206,7 +213,14 @@ mod test {
         let mut accumulator = vec![0f32; 4 * 3];
         let mut rng = SmallRng::seed_from_u64(1);
 
-        assert!(render_row(&scene, 0, 1, &mut accumulator, &control, &mut rng));
+        assert!(render_row(
+            &scene,
+            0,
+            1,
+            &mut accumulator,
+            &control,
+            &mut rng
+        ));
         for pixel in accumulator.chunks(3) {
             assert_eq!(pixel, [0.25, 0.5, 0.75]);
         }
@@ -220,7 +234,14 @@ mod test {
         let mut accumulator = vec![0.5f32; 4 * 3];
         let mut rng = SmallRng::seed_from_u64(2);
 
-        assert!(render_row(&scene, 1, 2, &mut accumulator, &control, &mut rng));
+        assert!(render_row(
+            &scene,
+            1,
+            2,
+            &mut accumulator,
+            &control,
+            &mut rng
+        ));
         for pixel in accumulator.chunks(3) {
             assert_eq!(pixel[0], (0.5 + 0.25) / 2.0);
             assert_eq!(pixel[1], (0.5 + 0.5) / 2.0);
@@ -236,8 +257,18 @@ mod test {
         let mut accumulator = vec![0f32; 4 * 3];
         let mut rng = SmallRng::seed_from_u64(3);
 
-        assert!(!render_row(&scene, 0, 1, &mut accumulator, &control, &mut rng));
-        assert!(accumulator.iter().all(|&v| v == 0f32), "stopped row must stay untouched");
+        assert!(!render_row(
+            &scene,
+            0,
+            1,
+            &mut accumulator,
+            &control,
+            &mut rng
+        ));
+        assert!(
+            accumulator.iter().all(|&v| v == 0f32),
+            "stopped row must stay untouched"
+        );
     }
 
     #[test]

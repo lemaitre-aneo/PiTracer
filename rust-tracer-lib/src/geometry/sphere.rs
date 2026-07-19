@@ -16,22 +16,20 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
     }
 
     fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit {
-        let radius2 = self.radius * self.radius;
-        let mut point = origin + distance * direction;
+        let point = origin + distance * direction;
         let outward_normal = (point - self.position).normalized();
         // The face is decided by the crossing direction at the hit point:
         // robust when the ray originates on the surface itself, where an
         // origin-inside-or-outside test is at the mercy of rounding.
         let front = direction.dot(outward_normal) < 0f32;
-
-        // Due to numeric imprecisions, the intersection point might be within the sphere
-        // In that case, force the intersection to be on the sphere
-        let distance_to_center = (point - self.position).norm2();
-        let diff = distance_to_center - radius2;
-        if diff < 0f32 {
-            point = self.position + outward_normal * self.radius;
-        }
         let normal = select(front, outward_normal, -outward_normal);
+
+        // No reprojection onto the sphere: its arithmetic rounds at the same
+        // ulp(radius + |position|) scale as the error it would correct, so it
+        // cannot control which side of the surface the point lands on (still
+        // ~1e-2 off at r = 1e5). Instead, report the placement noise bound;
+        // rays spawned `offset` off the surface clear it robustly.
+        let offset = crate::SURFACE_OFFSET_REL * (self.radius + self.position.norm());
 
         Hit {
             point,
@@ -40,6 +38,7 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
             u: point.x,
             v: point.y,
             distance,
+            offset,
         }
     }
 
@@ -87,23 +86,40 @@ impl Sphere {
         let oc = self.position - origin;
         let a = direction.norm2();
         let h = direction.dot(oc);
-        let c = oc.norm2() - self.radius * self.radius;
+        let oc2 = oc.norm2();
+        let r2 = self.radius * self.radius;
+        let c = oc2 - r2;
 
-        let delta = h * h - a * c;
+        // Vector-rejection discriminant (PBRT / Ray Tracing Gems): h² − a·c
+        // cancels catastrophically when r ≪ |oc| (a distant light is randomly
+        // missed) and near tangency; r² − |oc⊥|² compares like against like.
+        let perp = oc - (h / a) * direction;
+        let delta = a * (r2 - perp.norm2());
         if delta < 0f32 {
             return None;
         }
         let sqrtd = delta.sqrt();
 
+        // Citardauq pairing: the root q/a adds same-sign quantities, and c/q
+        // recovers the other from the exact product t₀·t₁ = c/a — no
+        // (h − √Δ) cancellation (t-error 0.40 at r = 1e6 with the naive form).
+        let q = h + sqrtd.copysign(h);
+        let (near, far) = if h >= 0f32 {
+            (c / q, q / a)
+        } else {
+            (q / a, c / q)
+        };
+
         // Smallest root beyond the self-intersection guard: a ray leaving the
         // surface into the sphere must report the far root (the chord), and a
-        // sphere entirely behind the ray must report nothing.
-        let near = (h - sqrtd) / a;
-        if near > crate::HIT_EPSILON {
+        // sphere entirely behind the ray must report nothing. The guard is
+        // relative (see HIT_EPSILON_REL); origins spawned via Hit::spawn sit
+        // off the surface and don't rely on it.
+        let guard2 = crate::HIT_EPSILON_REL * crate::HIT_EPSILON_REL * oc2;
+        if near > 0f32 && near * near > guard2 {
             return Some(near);
         }
-        let far = (h + sqrtd) / a;
-        if far > crate::HIT_EPSILON {
+        if far > 0f32 && far * far > guard2 {
             return Some(far);
         }
         None
@@ -281,6 +297,153 @@ mod test {
             1e-6,
         );
         assert!(hit.normal.dot(direction) < 0f32);
+    }
+
+    /// Entering distance vs ground truth at wall scale: the naive
+    /// (h − √Δ)/a subtraction lost ~0.4 units at r = 1e6; the Citardauq
+    /// pairing must stay within f32 rounding of the true root.
+    #[test]
+    fn hit_distance_accurate_at_wall_scale() {
+        // head-on: r = 1e6, origin 100 above the surface — exact answer 100
+        let t = sphere_at((0f32, 0f32, 0f32), 1e6f32)
+            .hit(Vector::from((0f32, 0f32, 1_000_100f32)), -UnitVector::Z)
+            .expect("must hit");
+        assert_close(t, 100f32, 1.5e-3);
+
+        // 45° onto an r = 1e5 floor — f64 reference root
+        let sphere = sphere_at((0f32, -1e5f32, 0f32), 1e5f32);
+        let origin = Vector::from((0f32, 30f32, 0f32));
+        let direction = Vector::from((1f32, -1f32, 0f32)).normalized();
+        let t = sphere.hit(origin, direction).expect("must hit");
+
+        let dy = f64::from(Vector::from(direction).y);
+        let h = dy * -100_030f64; // d·(C − O), x and z terms are 0
+        let c = 100_030f64 * 100_030f64 - 1e10f64;
+        let expected = c / (h + (h * h - c).sqrt());
+        assert_close(t, expected, 5e-4);
+    }
+
+    /// The naive discriminant h² − a·c cancels to rounding noise for a
+    /// distant small sphere (r ≪ |oc|): hits get missed or land a full
+    /// radius off. The rejection form must find them at the exact distance.
+    #[test]
+    fn hit_finds_far_small_spheres_exactly() {
+        for d in [1e4f32, 1e6f32] {
+            let t = sphere_at((0f32, 0f32, d), 1f32)
+                .hit(Vector::default(), UnitVector::Z)
+                .expect("must hit");
+            assert_close(t, d - 1f32, 1e-6);
+        }
+
+        // off-axis: impact parameter 0.6, entering root from the f64 quadratic
+        let t = sphere_at((0.6f32, 0f32, 1e4f32), 1f32)
+            .hit(Vector::default(), UnitVector::Z)
+            .expect("must hit");
+        let c = 0.6f64 * 0.6f64 + 1e8f64 - 1f64;
+        let expected = c / (1e4f64 + (1e8f64 - c).sqrt());
+        assert_close(t, expected, 1e-6);
+    }
+
+    /// Transmission through a small sphere: spawned just inside the entry
+    /// point, the ray must find the exit chord. The absolute 7e-2 guard
+    /// erased it for r ≤ 0.035 (the chord itself is ≤ 0.07), killing glass
+    /// beads entirely.
+    #[test]
+    fn small_sphere_exit_hit_preserved() {
+        let sphere = sphere_at((73f32, 46.5f32, 88f32), 0.035f32);
+        let origin = Vector::from((70f32, 46.5f32, 88f32));
+        let direction = UnitVector::X;
+
+        let t = sphere.hit(origin, direction).expect("must enter");
+        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, t);
+        assert!(hit.front);
+
+        // straight-through transmission: spawn on the inside
+        let inside = hit.spawn(direction);
+        let exit = sphere.hit(inside, direction).expect("exit hit erased");
+        assert_close(exit, 2f32 * 0.035f32 - hit.offset, 1e-4);
+    }
+
+    /// A ray spawned via Hit::spawn cannot re-intersect the surface it
+    /// leaves, at any scale and any outward angle — grazing included. This
+    /// invariant replaces the absolute guard: grazing phantoms reach
+    /// √(2·r·δ) (≈ 45 at wall scale for δ ≈ 1e-2), beyond any usable
+    /// threshold, but an origin strictly outside a convex surface cannot
+    /// re-hit it geometrically.
+    #[test]
+    fn spawn_clears_own_surface() {
+        let mut rng = rng(seeds()[1]);
+        for (radius, position) in [
+            (16.5f32, (40f32, 16.5f32, 47f32)),  // pitracer ball
+            (1e5f32, (50f32, -1e5f32, 81.6f32)), // pitracer wall
+            (0.035f32, (73f32, 46.5f32, 88f32)), // glass bead
+        ] {
+            let sphere = sphere_at(position, radius);
+            let axis = Vector::from((1f32, 2f32, 3f32)).normalized();
+            let origin = sphere.position + (1.5f32 * radius + 100f32) * axis;
+            let t = sphere.hit(origin, -axis).expect("must hit");
+            let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, -axis, t);
+
+            let mut directions = vec![hit.normal];
+            for angle in [30f64, 60f64, 85f64, 89.9f64, 89.99f64] {
+                directions.push(at_angle(hit.normal, angle.to_radians()));
+            }
+            for _ in 0..200 {
+                let w = UnitVector::random(&mut rng);
+                directions.push(crate::select(w.dot(hit.normal) >= 0f32, w, -w));
+            }
+
+            for scattered in directions {
+                let spawned = sphere.hit(hit.spawn(scattered), scattered);
+                assert!(
+                    spawned.is_none(),
+                    "self re-hit at r = {radius}: t = {spawned:?}, dir·n = {}",
+                    scattered.dot(hit.normal),
+                );
+            }
+        }
+    }
+
+    /// The offset reported by to_hit must bound the point's true distance
+    /// from the surface (measured in f64 — that is the invariant spawn
+    /// relies on) while staying far below the geometry itself.
+    #[test]
+    fn to_hit_offset_bounds_placement_noise() {
+        let mut rng = rng(seeds()[2]);
+        for (radius, position) in [
+            (16.5f32, (40f32, 16.5f32, 47f32)),
+            (1e5f32, (50f32, -1e5f32, 81.6f32)),
+            (0.035f32, (73f32, 46.5f32, 88f32)),
+        ] {
+            let sphere = sphere_at(position, radius);
+            for _ in 0..50 {
+                let towards = UnitVector::random(&mut rng);
+                let origin = sphere.position + (2f32 * radius + 50f32) * towards;
+                let aim = sphere.position + (0.3f32 * radius) * UnitVector::random(&mut rng);
+                let direction = (aim - origin).normalized();
+                let t = sphere.hit(origin, direction).expect("must hit");
+                let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, t);
+
+                assert!(hit.offset > 0f32);
+                assert!(
+                    hit.offset < 0.02f32 * radius,
+                    "offset {} not small vs r = {radius}",
+                    hit.offset
+                );
+
+                let to_center = [
+                    f64::from(hit.point.x) - f64::from(sphere.position.x),
+                    f64::from(hit.point.y) - f64::from(sphere.position.y),
+                    f64::from(hit.point.z) - f64::from(sphere.position.z),
+                ];
+                let err = to_center.iter().map(|d| d * d).sum::<f64>().sqrt() - f64::from(radius);
+                assert!(
+                    err.abs() < f64::from(hit.offset),
+                    "placement noise {err:e} exceeds offset {:e} at r = {radius}",
+                    hit.offset,
+                );
+            }
+        }
     }
 
     /// Sampling the sphere by solid angle from outside is uniform over the

@@ -149,6 +149,7 @@ pub(crate) fn hit_at(point: Vector, normal: UnitVector, front: bool) -> Hit {
         u: 0f32,
         v: 0f32,
         distance: 1f32,
+        offset: 0f32,
     }
 }
 
