@@ -184,10 +184,7 @@ impl Scene {
         // 2^k fireflies on deep paths), no path can exceed the physical bound.
         let mut emission_weight = 1f32;
 
-        loop {
-            let Some((best, hittable, closest)) = self.closest_hit(origin, direction, rng) else {
-                break;
-            };
+        while let Some((best, hittable, closest)) = self.closest_hit(origin, direction, rng) {
             let hit = best.as_geometry().to_hit(origin, direction, closest);
 
             let texture = best.as_texture(hittable).get(hit, rng);
