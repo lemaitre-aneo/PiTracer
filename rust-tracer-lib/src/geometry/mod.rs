@@ -1,10 +1,78 @@
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 
 use crate::{Material, Texture, UnitVector, Vector};
 
+mod quad;
 mod sphere;
 
+pub use quad::*;
 pub use sphere::*;
+
+/// The geometry side of a scene-definition object, discriminated by an
+/// explicit `type:` field (`type: sphere`, `type: quad`) in the same
+/// flattened YAML map that carries the material tag and texture keys.
+///
+/// Unlike `MaterialEnum` (where a missing `material:` deliberately falls back
+/// to Lambertian), a missing or unknown `type` is a hard deserialization
+/// error: geometry has no sensible default, and failing loudly is what keeps
+/// a typo from silently dropping an object.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum GeometryEnum {
+    #[serde(alias = "Sphere")]
+    Sphere(Sphere),
+    #[serde(alias = "Quad")]
+    Quad(Quad),
+}
+
+/// Only for `Object`'s container-level `#[serde(default)]` bound — the YAML
+/// path always goes through the tag and can never produce this.
+impl Default for GeometryEnum {
+    fn default() -> Self {
+        Self::Sphere(Sphere::default())
+    }
+}
+
+impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for GeometryEnum {
+    fn hit(&self, origin: Vector, direction: UnitVector, rng: &mut R) -> Option<f32> {
+        match self {
+            GeometryEnum::Sphere(sphere) => {
+                GeometryPrimitive::<R>::hit(sphere, origin, direction, rng)
+            }
+            GeometryEnum::Quad(quad) => GeometryPrimitive::<R>::hit(quad, origin, direction, rng),
+        }
+    }
+
+    fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit {
+        match self {
+            GeometryEnum::Sphere(sphere) => {
+                GeometryPrimitive::<R>::to_hit(sphere, origin, direction, distance)
+            }
+            GeometryEnum::Quad(quad) => {
+                GeometryPrimitive::<R>::to_hit(quad, origin, direction, distance)
+            }
+        }
+    }
+
+    fn target_random(&self, origin: Vector, rng: &mut R) -> UnitVector {
+        match self {
+            GeometryEnum::Sphere(sphere) => {
+                GeometryPrimitive::<R>::target_random(sphere, origin, rng)
+            }
+            GeometryEnum::Quad(quad) => GeometryPrimitive::<R>::target_random(quad, origin, rng),
+        }
+    }
+
+    fn target_pdf(&self, origin: Vector, scattered: UnitVector) -> f32 {
+        match self {
+            GeometryEnum::Sphere(sphere) => {
+                GeometryPrimitive::<R>::target_pdf(sphere, origin, scattered)
+            }
+            GeometryEnum::Quad(quad) => GeometryPrimitive::<R>::target_pdf(quad, origin, scattered),
+        }
+    }
+}
 
 pub(crate) trait GeometryPrimitive<R: crate::Rng + ?Sized = dyn RngCore>:
     std::fmt::Debug

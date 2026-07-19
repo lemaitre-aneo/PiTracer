@@ -6,27 +6,46 @@ camera:
   # field_of_view: 60
   # width: 320
   # height: 240
-  world_width: 1
-spheres:
+objects:
   # Top Light
-  - radius: 50
+  - type: sphere
+    radius: 50
     position: [0, 59.9, 9]
     emission: [1, 1, 1]
-  # Walls
-  - radius: 100000
-    position: [-100010, 0, 0]
+  # Walls: box x, y, z in [-10, 10],
+  # each face oversized 3 units so corner seams cannot leak
+  # Left (x = -10)
+  - type: quad
+    position: [-10, -13, -13]
+    u: [0, 26, 0]
+    v: [0, 0, 26]
     color: [0.75, 0, 0]
-  - radius: 100000
-    position: [100010, 0, 0]
+  # Right (x = 10)
+  - type: quad
+    position: [10, -13, -13]
+    u: [0, 26, 0]
+    v: [0, 0, 26]
     color: [0.25, .075, 0.75]
-  - radius: 100000
-    position: [0, 0, 100010]
+  # Back (z = 10)
+  - type: quad
+    position: [-13, -13, 10]
+    u: [26, 0, 0]
+    v: [0, 26, 0]
     color: [0.75, 0.75, 0.75]
-  - radius: 100000
-    position: [0, 0, -100010]
-  - radius: 100000
-    position: [0, 100010, 0]
+  # Front (z = -10, contains the camera)
+  - type: quad
+    position: [-13, -13, -10]
+    u: [26, 0, 0]
+    v: [0, 26, 0]
+  # Ceiling (y = 10)
+  - type: quad
+    position: [-13, 10, -13]
+    u: [26, 0, 0]
+    v: [0, 0, 26]
     color: [0.75, 0.75, 0.75]
-  - radius: 100000
-    position: [0, -100010, 0]
+  # Floor (y = -10)
+  - type: quad
+    position: [-13, -10, -13]
+    u: [26, 0, 0]
+    v: [0, 0, 26]
     color: [0.75, 0.75, 0.75]

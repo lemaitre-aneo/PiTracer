@@ -281,6 +281,185 @@ mod test {
         ::raytracer::Scene::from(definition)
     }
 
+    fn parse(yaml: &str) -> Result<::raytracer::SceneDefinition, config::ConfigError> {
+        config::Config::builder()
+            .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize::<::raytracer::SceneDefinition>()
+    }
+
+    /// The shipped scene must survive the whole deserialization stack (config
+    /// crate → serde flatten → the `type` tag → the geometry definition
+    /// modules): 13 objects (light + 6 balls, then 6 quad walls), and a
+    /// spot-checked wall whose geometry and color arrived intact.
+    #[test]
+    fn pitracer_yaml_parses_objects() {
+        let definition = config::Config::builder()
+            .add_source(config::File::with_name("pitracer.yml"))
+            .build()
+            .unwrap()
+            .try_deserialize::<::raytracer::SceneDefinition>()
+            .unwrap();
+        assert_eq!(definition.objects.len(), 13);
+        let quads = definition
+            .objects
+            .iter()
+            .filter(|o| matches!(o.geometry, ::raytracer::GeometryEnum::Quad(_)))
+            .count();
+        assert_eq!(quads, 6);
+
+        let left = &definition.objects[7];
+        assert_eq!(
+            left.geometry,
+            ::raytracer::GeometryEnum::Quad(::raytracer::Quad::new(
+                (1f32, -5f32, -5f32).into(),
+                (0f32, 91.6f32, 0f32).into(),
+                (0f32, 0f32, 310f32).into(),
+            ))
+        );
+        assert_eq!(left.texture.color, (0.75f32, 0.25f32, 0.25f32).into());
+    }
+
+    /// One quad entry carries geometry, material, and texture keys in a
+    /// single YAML map.
+    #[test]
+    fn quad_entry_carries_material_and_texture() {
+        let definition = parse(
+            "\
+objects:
+  - type: quad
+    position: [1, 2, 3]
+    u: [1, 0, 0]
+    v: [0, 1, 0]
+    material: Metal
+    fuzziness: 0.25
+    color: [0.1, 0.2, 0.3]
+    emission: [1, 2, 3]
+",
+        )
+        .unwrap();
+        let quad = &definition.objects[0];
+        assert_eq!(
+            quad.material,
+            ::raytracer::MaterialEnum::Metal(::raytracer::Metal { fuzziness: 0.25 })
+        );
+        assert_eq!(quad.texture.emission, (1f32, 2f32, 3f32).into());
+    }
+
+    /// The pre-rename `fuziness` spelling stays accepted as an alias; both
+    /// spellings land in the same field.
+    #[test]
+    fn fuzziness_accepts_legacy_spelling() {
+        for spelling in ["fuzziness", "fuziness"] {
+            let definition = parse(&format!(
+                "\
+objects:
+  - type: sphere
+    radius: 1
+    material: Metal
+    {spelling}: 0.25
+"
+            ))
+            .unwrap();
+            assert_eq!(
+                definition.objects[0].material,
+                ::raytracer::MaterialEnum::Metal(::raytracer::Metal { fuzziness: 0.25 }),
+                "spelling `{spelling}`"
+            );
+        }
+    }
+
+    /// An object entry without a `type` field must be a hard parse error, not
+    /// a silent default — geometry has no sensible fallback.
+    #[test]
+    fn untyped_object_is_rejected() {
+        let result = parse(
+            "\
+objects:
+  - radius: 10
+    position: [50, 81.6, 61.6]
+    emission: [10, 10, 10]
+",
+        );
+        assert!(result.is_err(), "missing `type` must fail: {result:?}");
+    }
+
+    /// An unknown `type` value must be a hard parse error.
+    #[test]
+    fn unknown_type_is_rejected() {
+        let result = parse(
+            "\
+objects:
+  - type: cube
+    position: [1, 2, 3]
+",
+        );
+        assert!(result.is_err(), "unknown `type` must fail: {result:?}");
+    }
+
+    /// Title-case tags are tolerated via serde aliases.
+    #[test]
+    fn title_case_type_accepted() {
+        let definition = parse(
+            "\
+objects:
+  - type: Sphere
+    radius: 1
+    position: [0, 0, 5]
+  - type: Quad
+    position: [0, 0, 5]
+    u: [1, 0, 0]
+    v: [0, 1, 0]
+",
+        )
+        .unwrap();
+        assert_eq!(definition.objects.len(), 2);
+        assert!(matches!(
+            definition.objects[0].geometry,
+            ::raytracer::GeometryEnum::Sphere(_)
+        ));
+        assert!(matches!(
+            definition.objects[1].geometry,
+            ::raytracer::GeometryEnum::Quad(_)
+        ));
+    }
+
+    /// An object entry without a `material:` key defaults to Lambertian.
+    #[test]
+    fn absent_material_defaults_to_lambertian() {
+        let definition = parse(
+            "\
+objects:
+  - type: sphere
+    radius: 1
+",
+        )
+        .unwrap();
+        assert_eq!(
+            definition.objects[0].material,
+            ::raytracer::MaterialEnum::Lambertian(::raytracer::Lambertian {})
+        );
+    }
+
+    /// Documented migration failure mode: the old top-level `spheres:` /
+    /// `quads:` keys are unknown to `SceneDefinition` and silently dropped
+    /// (`#[serde(default)]` container) — an unmigrated file yields an empty
+    /// scene rather than an error. Pinned here; catalogued in BACKLOG P0.
+    #[test]
+    fn legacy_top_level_keys_are_dropped() {
+        let definition = parse(
+            "\
+spheres:
+  - radius: 1
+    position: [50, 81.6, 61.6]
+    emission: [10, 10, 10]
+",
+        )
+        .unwrap();
+        assert!(definition.objects.is_empty());
+    }
+
     /// Regression: on the real scene, every radiance sample must be finite
     /// and below the physical path bound 2·E_max·(depth+1) — fireflies from
     /// estimator reweighting showed up here as saturated specks.

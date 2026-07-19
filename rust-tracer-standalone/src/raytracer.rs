@@ -173,7 +173,8 @@ pub fn render_thread(scene: Scene, control: Arc<Control>, sender: EventSender) {
 mod test {
     use super::*;
     use ::raytracer::{
-        CameraDefinition, Flat, Lambertian, MaterialEnum, Object, SceneDefinition, Sphere, Vector,
+        CameraDefinition, Flat, GeometryEnum, Lambertian, MaterialEnum, Object, SceneDefinition,
+        Sphere, Vector,
     };
 
     /// Camera enclosed in a purely emissive sphere: every sample of every
@@ -188,11 +189,11 @@ mod test {
                 height: 4,
                 world_height: 0.1,
             },
-            spheres: vec![Object::new(
-                Sphere {
+            objects: vec![Object::new(
+                GeometryEnum::Sphere(Sphere {
                     radius: 10f32,
                     position: Vector::default(),
-                },
+                }),
                 MaterialEnum::Lambertian(Lambertian {}),
                 Flat {
                     color: (0f32, 0f32, 0f32).into(),

@@ -5,14 +5,18 @@ use crate::{Hit, Material, UnitVector};
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Metal {
-    pub fuziness: f32,
+    /// The historical `fuziness` spelling stays accepted; unknown keys are
+    /// dropped by the flatten composition, so without the alias old files
+    /// would quietly become perfect mirrors.
+    #[serde(alias = "fuziness")]
+    pub fuzziness: f32,
 }
 
 impl<R: crate::Rng + ?Sized> Material<R> for Metal {
     fn scatter(&self, direction: UnitVector, hit: Hit, rng: &mut R) -> Option<UnitVector> {
         let reflected = direction.reflect(hit.normal);
-        if self.fuziness > 0f32 {
-            Some((reflected + self.fuziness * UnitVector::random(rng)).normalized())
+        if self.fuzziness > 0f32 {
+            Some((reflected + self.fuzziness * UnitVector::random(rng)).normalized())
         } else {
             Some(reflected)
         }
@@ -35,8 +39,8 @@ mod test {
     }
 
     #[test]
-    fn mirror_when_fuziness_zero() {
-        let material: &dyn Material = &Metal { fuziness: 0f32 };
+    fn mirror_when_fuzziness_zero() {
+        let material: &dyn Material = &Metal { fuzziness: 0f32 };
         let mut rng = rng(seeds()[0]);
         for _ in 0..100 {
             let (incoming, hit) = fixture(&mut rng);
@@ -55,16 +59,16 @@ mod test {
         }
     }
 
-    /// Fuzz model: scattered = normalize(mirror + fuziness·u) with |u| = 1,
-    /// so the angle to the mirror direction is at most asin(fuziness):
-    /// scattered·mirror ≥ √(1 − fuziness²). The distribution inside the cone
+    /// Fuzz model: scattered = normalize(mirror + fuzziness·u) with |u| = 1,
+    /// so the angle to the mirror direction is at most asin(fuzziness):
+    /// scattered·mirror ≥ √(1 − fuzziness²). The distribution inside the cone
     /// is a modeling choice; only the bound is spec.
     #[test]
     fn fuzz_cone_bound() {
         let mut rng = rng(seeds()[1]);
-        for fuziness in [0.1f32, 0.5f32, 0.9f32] {
-            let material: &dyn Material = &Metal { fuziness };
-            let bound = (1f32 - fuziness * fuziness).sqrt();
+        for fuzziness in [0.1f32, 0.5f32, 0.9f32] {
+            let material: &dyn Material = &Metal { fuzziness };
+            let bound = (1f32 - fuzziness * fuzziness).sqrt();
             let (incoming, hit) = fixture(&mut rng);
             let mirror = incoming.reflect(hit.normal);
             for _ in 0..10_000 {
@@ -73,7 +77,7 @@ mod test {
                     .expect("must scatter");
                 assert!(
                     scattered.dot(mirror) >= bound - 1e-5,
-                    "fuzz {fuziness}: {scattered:?} is {} > asin(fuziness) away from {mirror:?}",
+                    "fuzz {fuzziness}: {scattered:?} is {} > asin(fuzziness) away from {mirror:?}",
                     scattered.dot(mirror).acos(),
                 );
             }
@@ -88,8 +92,8 @@ mod test {
     fn pdf_is_zero_delta() {
         let mut rng = rng(seeds()[2]);
         let materials: [&dyn Material; 3] = [
-            &Metal { fuziness: 0f32 },
-            &Metal { fuziness: 0.5f32 },
+            &Metal { fuzziness: 0f32 },
+            &Metal { fuzziness: 0.5f32 },
             &Dielectric::new(1.5f32),
         ];
         for material in materials {

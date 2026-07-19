@@ -4,15 +4,15 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Camera, CameraDefinition, Color, Flat, Geometry, HitCaster, Hittable, MaterialEnum, Object,
-    Sphere, TextureProperty, UnitVector, Vector,
+    Camera, CameraDefinition, Color, Flat, Geometry, GeometryEnum, HitCaster, Hittable,
+    MaterialEnum, Object, TextureProperty, UnitVector, Vector,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SceneDefinition {
     pub camera: CameraDefinition,
-    pub spheres: Vec<Object<Sphere, MaterialEnum, Flat>>,
+    pub objects: Vec<Object<GeometryEnum, MaterialEnum, Flat>>,
     pub recursion_depth: u32,
     pub samples: u32,
     pub gamma: f32,
@@ -23,7 +23,7 @@ impl Default for SceneDefinition {
     fn default() -> Self {
         Self {
             camera: Default::default(),
-            spheres: Default::default(),
+            objects: Default::default(),
             recursion_depth: 10,
             samples: 100,
             gamma: 2.2,
@@ -50,29 +50,49 @@ impl Default for Scene {
     }
 }
 
+/// Monomorphizes one scene object (any geometry, the material still a
+/// definition-side enum) into a hittable trait object, paired with its
+/// light-sampling weight |emission|².
+fn build_hittable<G: Geometry + Send + Sync + 'static>(
+    object: Object<G, MaterialEnum, Flat>,
+) -> (Arc<dyn Hittable + Send + Sync>, f32) {
+    let w = object.texture.emission.norm2();
+    let h = match object.material {
+        MaterialEnum::Lambertian(lambertian) => {
+            Arc::new(Object::new(object.geometry, lambertian, object.texture))
+                as Arc<dyn Hittable + Send + Sync>
+        }
+        MaterialEnum::Metal(metal) => Arc::new(Object::new(object.geometry, metal, object.texture))
+            as Arc<dyn Hittable + Send + Sync>,
+        MaterialEnum::Dielectric(dielectric) => {
+            Arc::new(Object::new(object.geometry, dielectric, object.texture))
+                as Arc<dyn Hittable + Send + Sync>
+        }
+    };
+    (h, w)
+}
+
+/// Peels the geometry tag off a definition object so `build_hittable` can
+/// monomorphize the full geometry × material product.
+fn build_object(
+    object: Object<GeometryEnum, MaterialEnum, Flat>,
+) -> (Arc<dyn Hittable + Send + Sync>, f32) {
+    match object.geometry {
+        GeometryEnum::Sphere(sphere) => {
+            build_hittable(Object::new(sphere, object.material, object.texture))
+        }
+        GeometryEnum::Quad(quad) => {
+            build_hittable(Object::new(quad, object.material, object.texture))
+        }
+    }
+}
+
 impl From<SceneDefinition> for Scene {
     fn from(value: SceneDefinition) -> Self {
         let hittables = value
-            .spheres
+            .objects
             .into_iter()
-            .map(|object| {
-                let w = object.texture.emission.norm2();
-                let h = match object.material {
-                    MaterialEnum::Lambertian(lambertian) => {
-                        Arc::new(Object::new(object.geometry, lambertian, object.texture))
-                            as Arc<dyn Hittable + Send + Sync>
-                    }
-                    MaterialEnum::Metal(metal) => {
-                        Arc::new(Object::new(object.geometry, metal, object.texture))
-                            as Arc<dyn Hittable + Send + Sync>
-                    }
-                    MaterialEnum::Dielectric(dielectric) => {
-                        Arc::new(Object::new(object.geometry, dielectric, object.texture))
-                            as Arc<dyn Hittable + Send + Sync>
-                    }
-                };
-                (h, w)
-            })
+            .map(build_object)
             .collect::<Vec<_>>();
 
         let mut points_of_interest = hittables
@@ -291,7 +311,7 @@ impl Scene {
 mod test {
     use super::*;
     use crate::test_utils::{Stats, assert_close, assert_stat_close, rng, seeds};
-    use crate::{Lambertian, Metal, Vector};
+    use crate::{Lambertian, Metal, Quad, Sphere, Vector};
 
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 4;
@@ -301,12 +321,29 @@ mod test {
         radius: f32,
         color: (f32, f32, f32),
         emission: (f32, f32, f32),
-    ) -> Object<Sphere, MaterialEnum, Flat> {
+    ) -> Object<GeometryEnum, MaterialEnum, Flat> {
         Object::new(
-            Sphere {
+            GeometryEnum::Sphere(Sphere {
                 radius,
                 position: position.into(),
+            }),
+            MaterialEnum::Lambertian(Lambertian {}),
+            Flat {
+                color: color.into(),
+                emission: emission.into(),
             },
+        )
+    }
+
+    fn quad_lambertian(
+        position: (f32, f32, f32),
+        u: (f32, f32, f32),
+        v: (f32, f32, f32),
+        color: (f32, f32, f32),
+        emission: (f32, f32, f32),
+    ) -> Object<GeometryEnum, MaterialEnum, Flat> {
+        Object::new(
+            GeometryEnum::Quad(Quad::new(position.into(), u.into(), v.into())),
             MaterialEnum::Lambertian(Lambertian {}),
             Flat {
                 color: color.into(),
@@ -318,7 +355,7 @@ mod test {
     fn scene(
         camera_origin: (f32, f32, f32),
         camera_direction: (f32, f32, f32),
-        spheres: Vec<Object<Sphere, MaterialEnum, Flat>>,
+        objects: Vec<Object<GeometryEnum, MaterialEnum, Flat>>,
         recursion_depth: u32,
         light_sampling: bool,
     ) -> Scene {
@@ -331,7 +368,7 @@ mod test {
                 height: HEIGHT,
                 world_height: 0.1,
             },
-            spheres,
+            objects,
             recursion_depth,
             samples: 1,
             gamma: 2.2,
@@ -409,6 +446,34 @@ mod test {
         )
     }
 
+    /// Same floor and camera as `direct_light_scene`, but lit by a 1×1
+    /// horizontal quad (E = 5) centered at height 1 above P = (0,0,0). OFF
+    /// uses the quad only as passive geometry (BRDF rays must find it); ON
+    /// additionally routes NEE through target_random/target_pdf.
+    fn quad_light_scene(light_sampling: bool) -> Scene {
+        scene(
+            (1.2f32, 1.2f32, 0f32),
+            (-1.2f32, -1.2f32, 0f32),
+            vec![
+                lambertian(
+                    (0f32, -100f32, 0f32),
+                    100f32,
+                    (0.75f32, 0.75f32, 0.75f32),
+                    (0f32, 0f32, 0f32),
+                ),
+                quad_lambertian(
+                    (-0.5f32, 1f32, -0.5f32),
+                    (1f32, 0f32, 0f32),
+                    (0f32, 0f32, 1f32),
+                    (0f32, 0f32, 0f32),
+                    (5f32, 5f32, 5f32),
+                ),
+            ],
+            5,
+            light_sampling,
+        )
+    }
+
     #[test]
     fn gamma_endpoints_monotone_clamp() {
         let scene = scene((0f32, 0f32, 0f32), (0f32, 0f32, 1f32), vec![], 10, false);
@@ -433,10 +498,11 @@ mod test {
 
     /// Only normalization is spec (relative weighting between lights is
     /// implementation freedom): weights > 0 summing to 1, CDF non-decreasing
-    /// and ending at 1.
+    /// and ending at 1. Emissive quads must enter the pool exactly like
+    /// emissive spheres; dark ones must not.
     #[test]
     fn points_of_interest_normalized() {
-        let scene4 = scene(
+        let scene6 = scene(
             (0f32, 0f32, 0f32),
             (0f32, 0f32, 1f32),
             vec![
@@ -464,14 +530,28 @@ mod test {
                     (0f32, 0f32, 0f32),
                     (0.5f32, 0.5f32, 0.5f32),
                 ),
+                quad_lambertian(
+                    (-1f32, 4f32, 4f32),
+                    (2f32, 0f32, 0f32),
+                    (0f32, 0f32, 2f32),
+                    (0f32, 0f32, 0f32),
+                    (1f32, 1f32, 1f32),
+                ),
+                quad_lambertian(
+                    (-1f32, -4f32, 4f32),
+                    (2f32, 0f32, 0f32),
+                    (0f32, 0f32, 2f32),
+                    (0.5f32, 0.5f32, 0.5f32),
+                    (0f32, 0f32, 0f32),
+                ),
             ],
             10,
             true,
         );
-        assert_eq!(scene4.points_of_interest.len(), 2);
+        assert_eq!(scene6.points_of_interest.len(), 3);
         let mut total = 0f32;
         let mut cdf = 0f32;
-        for (_, weight, cumulative) in &scene4.points_of_interest {
+        for (_, weight, cumulative) in &scene6.points_of_interest {
             assert!(*weight > 0f32);
             total += weight;
             assert!(*cumulative >= cdf, "CDF must be non-decreasing");
@@ -500,6 +580,76 @@ mod test {
                     (0f32, 0f32, 0f32),
                     (0.25f32, 0.5f32, 0.75f32),
                 )],
+                10,
+                light_sampling,
+            );
+            let mut rng = rng(seeds()[0]);
+            for (x, y) in [
+                (2f32, 2f32),
+                (0.5f32, 0.5f32),
+                (3.5f32, 1f32),
+                (1f32, 3f32),
+                (2.5f32, 2.5f32),
+            ] {
+                for _ in 0..20 {
+                    let color = scene.radiance(x, y, &mut rng);
+                    assert_eq!(
+                        (color.r, color.g, color.b),
+                        (0.25f32, 0.5f32, 0.75f32),
+                        "light_sampling = {light_sampling}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// A closed box of purely emissive quads around the camera: every path
+    /// terminates on its first hit with exactly E — pins the full loop
+    /// (camera → quad hit → to_hit → emission pickup) with zero MC noise,
+    /// with and without light sampling.
+    #[test]
+    fn emissive_quad_box_exact() {
+        let black = (0f32, 0f32, 0f32);
+        let emission = (0.25f32, 0.5f32, 0.75f32);
+        let walls = [
+            (
+                (-5f32, -5f32, -5f32),
+                (0f32, 10f32, 0f32),
+                (0f32, 0f32, 10f32),
+            ),
+            (
+                (5f32, -5f32, -5f32),
+                (0f32, 10f32, 0f32),
+                (0f32, 0f32, 10f32),
+            ),
+            (
+                (-5f32, -5f32, -5f32),
+                (10f32, 0f32, 0f32),
+                (0f32, 0f32, 10f32),
+            ),
+            (
+                (-5f32, 5f32, -5f32),
+                (10f32, 0f32, 0f32),
+                (0f32, 0f32, 10f32),
+            ),
+            (
+                (-5f32, -5f32, -5f32),
+                (10f32, 0f32, 0f32),
+                (0f32, 10f32, 0f32),
+            ),
+            (
+                (-5f32, -5f32, 5f32),
+                (10f32, 0f32, 0f32),
+                (0f32, 10f32, 0f32),
+            ),
+        ];
+        for light_sampling in [false, true] {
+            let scene = scene(
+                (0f32, 0f32, 0f32),
+                (0f32, 0f32, 1f32),
+                walls
+                    .map(|(position, u, v)| quad_lambertian(position, u, v, black, emission))
+                    .to_vec(),
                 10,
                 light_sampling,
             );
@@ -635,6 +785,26 @@ mod test {
         }
     }
 
+    /// Estimator equality for the quad light: ON and OFF must converge to the
+    /// same mean. This is the load-bearing bias detector for the quad's
+    /// target_random/target_pdf pair inside the full NEE+MIS estimator (OFF
+    /// never touches that code, so a wrong pdf or sampler moves ON only).
+    #[test]
+    fn quad_light_sampling_invariance() {
+        let off = sample_center(&quad_light_scene(false), 300_000, seeds()[0]);
+        let on = sample_center(&quad_light_scene(true), 100_000, seeds()[1]);
+        for (off, on) in off.iter().zip(&on) {
+            let se = (off.se().powi(2) + on.se().powi(2)).sqrt();
+            assert!(
+                (off.mean() - on.mean()).abs() <= 4f64 * se,
+                "quad light: ON {} vs OFF {} ({:.1}σ)",
+                on.mean(),
+                off.mean(),
+                (off.mean() - on.mean()).abs() / se,
+            );
+        }
+    }
+
     /// The original complaint: on a small bright light (4% BRDF hit rate),
     /// light sampling must REDUCE variance — conservatively by 2×; a correct
     /// mixture gains about an order of magnitude here.
@@ -670,11 +840,11 @@ mod test {
                 (0f32, 0f32, 1f32),
                 vec![
                     Object::new(
-                        Sphere {
+                        GeometryEnum::Sphere(Sphere {
                             radius: 1f32,
                             position: Vector::default(),
-                        },
-                        MaterialEnum::Metal(Metal { fuziness: 0f32 }),
+                        }),
+                        MaterialEnum::Metal(Metal { fuzziness: 0f32 }),
                         Flat {
                             color: (0.9f32, 0.9f32, 0.9f32).into(),
                             emission: Color::default(),
@@ -773,6 +943,51 @@ mod test {
                 lambertian(
                     (0f32, 8f32, 0f32),
                     1f32,
+                    (0f32, 0f32, 0f32),
+                    (10f32, 10f32, 10f32),
+                ),
+            ],
+            depth,
+            true,
+        );
+        let bound = 2f64 * 10f64 * f64::from(depth + 1);
+        let mut rng = rng(seeds()[0]);
+        let mut max = 0f64;
+        for _ in 0..100_000 {
+            let color = scene.radiance(2f32, 2f32, &mut rng);
+            for value in [color.r, color.g, color.b] {
+                assert!(value.is_finite(), "non-finite radiance {color:?}");
+                max = max.max(f64::from(value));
+            }
+        }
+        assert!(
+            max <= bound,
+            "firefly: max sample {max} exceeds the physical bound {bound}"
+        );
+    }
+
+    /// Firefly bound with a quad light: same 2·E_max·(depth+1) invariant
+    /// through the quad pdf, including shading points nearly coplanar with
+    /// the light (where target_pdf is 0 and the direct term must just skip).
+    #[test]
+    fn quad_light_no_fireflies() {
+        let depth = 30;
+        let scene = scene(
+            (0f32, 0f32, 0f32),
+            (0f32, 0f32, 1f32),
+            vec![
+                // near-white enclosure: deep paths keep almost full throughput
+                lambertian(
+                    (0f32, 0f32, 0f32),
+                    10f32,
+                    (0.999f32, 0.999f32, 0.999f32),
+                    (0f32, 0f32, 0f32),
+                ),
+                // small bright quad light inside
+                quad_lambertian(
+                    (-0.5f32, 8f32, -0.5f32),
+                    (1f32, 0f32, 0f32),
+                    (0f32, 0f32, 1f32),
                     (0f32, 0f32, 0f32),
                     (10f32, 10f32, 10f32),
                 ),
