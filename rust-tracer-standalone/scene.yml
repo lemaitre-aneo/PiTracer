@@ -7,10 +7,12 @@ camera:
   # width: 320
   # height: 240
 objects:
-  # Top Light
-  - type: sphere
-    radius: 50
-    position: [0, 59.9, 9]
+  # Top Light (elliptical panel just below the ceiling at y = 10; same area
+  # and depth as the cap the old r=50 sphere used to poke into the room)
+  - type: ellipse
+    position: [0, 9.9, 9]
+    u: [4, 0, 0]
+    v: [0, 0, 2.5]
     emission: [1, 1, 1]
   # Walls: box x, y, z in [-10, 10],
   # each face oversized 3 units so corner seams cannot leak

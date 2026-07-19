@@ -84,6 +84,9 @@ fn build_object(
         GeometryEnum::Quad(quad) => {
             build_hittable(Object::new(quad, object.material, object.texture))
         }
+        GeometryEnum::Ellipse(ellipse) => {
+            build_hittable(Object::new(ellipse, object.material, object.texture))
+        }
     }
 }
 
@@ -311,7 +314,7 @@ impl Scene {
 mod test {
     use super::*;
     use crate::test_utils::{Stats, assert_close, assert_stat_close, rng, seeds};
-    use crate::{Lambertian, Metal, Quad, Sphere, Vector};
+    use crate::{Ellipse, Lambertian, Metal, Quad, Sphere, Vector};
 
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 4;
@@ -344,6 +347,23 @@ mod test {
     ) -> Object<GeometryEnum, MaterialEnum, Flat> {
         Object::new(
             GeometryEnum::Quad(Quad::new(position.into(), u.into(), v.into())),
+            MaterialEnum::Lambertian(Lambertian {}),
+            Flat {
+                color: color.into(),
+                emission: emission.into(),
+            },
+        )
+    }
+
+    fn ellipse_lambertian(
+        position: (f32, f32, f32),
+        u: (f32, f32, f32),
+        v: (f32, f32, f32),
+        color: (f32, f32, f32),
+        emission: (f32, f32, f32),
+    ) -> Object<GeometryEnum, MaterialEnum, Flat> {
+        Object::new(
+            GeometryEnum::Ellipse(Ellipse::new(position.into(), u.into(), v.into())),
             MaterialEnum::Lambertian(Lambertian {}),
             Flat {
                 color: color.into(),
@@ -472,6 +492,53 @@ mod test {
             5,
             light_sampling,
         )
+    }
+
+    /// Same floor and camera as `quad_light_scene`, but lit by a disk light
+    /// (semi-axes 0.5) centered at height 1 above P = (0,0,0). OFF uses the
+    /// ellipse only as passive geometry; ON additionally routes NEE through
+    /// its target_random/target_pdf.
+    fn ellipse_light_scene(light_sampling: bool) -> Scene {
+        scene(
+            (1.2f32, 1.2f32, 0f32),
+            (-1.2f32, -1.2f32, 0f32),
+            vec![
+                lambertian(
+                    (0f32, -100f32, 0f32),
+                    100f32,
+                    (0.75f32, 0.75f32, 0.75f32),
+                    (0f32, 0f32, 0f32),
+                ),
+                ellipse_lambertian(
+                    (0f32, 1f32, 0f32),
+                    (0.5f32, 0f32, 0f32),
+                    (0f32, 0f32, 0.5f32),
+                    (0f32, 0f32, 0f32),
+                    (5f32, 5f32, 5f32),
+                ),
+            ],
+            5,
+            light_sampling,
+        )
+    }
+
+    /// Estimator equality for the disk light: ON and OFF must converge to
+    /// the same mean — the load-bearing bias detector for the ellipse's
+    /// target_random/target_pdf pair inside the full NEE+MIS estimator.
+    #[test]
+    fn ellipse_light_sampling_invariance() {
+        let off = sample_center(&ellipse_light_scene(false), 300_000, seeds()[0]);
+        let on = sample_center(&ellipse_light_scene(true), 100_000, seeds()[1]);
+        for (off, on) in off.iter().zip(&on) {
+            let se = (off.se().powi(2) + on.se().powi(2)).sqrt();
+            assert!(
+                (off.mean() - on.mean()).abs() <= 4f64 * se,
+                "ellipse light: ON {} vs OFF {} ({:.1}σ)",
+                on.mean(),
+                off.mean(),
+                (off.mean() - on.mean()).abs() / se,
+            );
+        }
     }
 
     #[test]

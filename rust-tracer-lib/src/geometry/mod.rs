@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Material, Texture, UnitVector, Vector};
 
+mod ellipse;
 mod quad;
 mod sphere;
 
+pub use ellipse::*;
 pub use quad::*;
 pub use sphere::*;
 
@@ -24,6 +26,8 @@ pub enum GeometryEnum {
     Sphere(Sphere),
     #[serde(alias = "Quad")]
     Quad(Quad),
+    #[serde(alias = "Ellipse")]
+    Ellipse(Ellipse),
 }
 
 /// Only for `Object`'s container-level `#[serde(default)]` bound — the YAML
@@ -41,6 +45,9 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for GeometryEnum {
                 GeometryPrimitive::<R>::hit(sphere, origin, direction, rng)
             }
             GeometryEnum::Quad(quad) => GeometryPrimitive::<R>::hit(quad, origin, direction, rng),
+            GeometryEnum::Ellipse(ellipse) => {
+                GeometryPrimitive::<R>::hit(ellipse, origin, direction, rng)
+            }
         }
     }
 
@@ -52,6 +59,9 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for GeometryEnum {
             GeometryEnum::Quad(quad) => {
                 GeometryPrimitive::<R>::to_hit(quad, origin, direction, distance)
             }
+            GeometryEnum::Ellipse(ellipse) => {
+                GeometryPrimitive::<R>::to_hit(ellipse, origin, direction, distance)
+            }
         }
     }
 
@@ -61,6 +71,9 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for GeometryEnum {
                 GeometryPrimitive::<R>::target_random(sphere, origin, rng)
             }
             GeometryEnum::Quad(quad) => GeometryPrimitive::<R>::target_random(quad, origin, rng),
+            GeometryEnum::Ellipse(ellipse) => {
+                GeometryPrimitive::<R>::target_random(ellipse, origin, rng)
+            }
         }
     }
 
@@ -70,6 +83,9 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for GeometryEnum {
                 GeometryPrimitive::<R>::target_pdf(sphere, origin, scattered)
             }
             GeometryEnum::Quad(quad) => GeometryPrimitive::<R>::target_pdf(quad, origin, scattered),
+            GeometryEnum::Ellipse(ellipse) => {
+                GeometryPrimitive::<R>::target_pdf(ellipse, origin, scattered)
+            }
         }
     }
 }

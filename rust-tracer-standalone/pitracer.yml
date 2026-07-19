@@ -6,10 +6,12 @@ camera:
   direction: [0, -0.042612, -1]
   field_of_view: 35
 objects:
-  # Top Light
-  - type: sphere
-    radius: 10
-    position: [50, 81.6, 61.6]
+  # Top Light (elliptical panel just below the ceiling at y = 81.6:
+  # coplanar with the ceiling quad it would tie-break per-ulp and speckle)
+  - type: ellipse
+    position: [50, 81.5, 61.6]
+    u: [12, 0, 0]
+    v: [0, 0, 8]
     emission: [10, 10, 10]
   # Balls
   - type: sphere

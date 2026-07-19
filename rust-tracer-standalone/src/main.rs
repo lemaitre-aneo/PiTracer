@@ -291,8 +291,9 @@ mod test {
 
     /// The shipped scene must survive the whole deserialization stack (config
     /// crate → serde flatten → the `type` tag → the geometry definition
-    /// modules): 13 objects (light + 6 balls, then 6 quad walls), and a
-    /// spot-checked wall whose geometry and color arrived intact.
+    /// modules): 13 objects (ellipse light + 6 ball spheres, then 6 quad
+    /// walls), and a spot-checked wall whose geometry and color arrived
+    /// intact.
     #[test]
     fn pitracer_yaml_parses_objects() {
         let definition = config::Config::builder()
@@ -308,6 +309,10 @@ mod test {
             .filter(|o| matches!(o.geometry, ::raytracer::GeometryEnum::Quad(_)))
             .count();
         assert_eq!(quads, 6);
+        assert!(matches!(
+            definition.objects[0].geometry,
+            ::raytracer::GeometryEnum::Ellipse(_)
+        ));
 
         let left = &definition.objects[7];
         assert_eq!(
@@ -411,10 +416,14 @@ objects:
     position: [0, 0, 5]
     u: [1, 0, 0]
     v: [0, 1, 0]
+  - type: Ellipse
+    position: [0, 0, 5]
+    u: [1, 0, 0]
+    v: [0, 1, 0]
 ",
         )
         .unwrap();
-        assert_eq!(definition.objects.len(), 2);
+        assert_eq!(definition.objects.len(), 3);
         assert!(matches!(
             definition.objects[0].geometry,
             ::raytracer::GeometryEnum::Sphere(_)
@@ -423,6 +432,37 @@ objects:
             definition.objects[1].geometry,
             ::raytracer::GeometryEnum::Quad(_)
         ));
+        assert!(matches!(
+            definition.objects[2].geometry,
+            ::raytracer::GeometryEnum::Ellipse(_)
+        ));
+    }
+
+    /// An ellipse entry round-trips through the flatten + definition path:
+    /// geometry (center + semi-axes) and texture arrive intact.
+    #[test]
+    fn ellipse_entry_parses() {
+        let definition = parse(
+            "\
+objects:
+  - type: ellipse
+    position: [50, 81.5, 61.6]
+    u: [12, 0, 0]
+    v: [0, 0, 8]
+    color: [0.1, 0.2, 0.3]
+",
+        )
+        .unwrap();
+        let light = &definition.objects[0];
+        assert_eq!(
+            light.geometry,
+            ::raytracer::GeometryEnum::Ellipse(::raytracer::Ellipse::new(
+                (50f32, 81.5f32, 61.6f32).into(),
+                (12f32, 0f32, 0f32).into(),
+                (0f32, 0f32, 8f32).into(),
+            ))
+        );
+        assert_eq!(light.texture.color, (0.1f32, 0.2f32, 0.3f32).into());
     }
 
     /// An object entry without a `material:` key defaults to Lambertian.
