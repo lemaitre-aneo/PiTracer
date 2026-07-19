@@ -36,8 +36,8 @@ impl Default for SceneDefinition {
 #[serde(from = "SceneDefinition")]
 pub struct Scene {
     pub camera: Camera,
-    pub hittables: Vec<Arc<dyn Hittable>>,
-    pub points_of_interest: Vec<(Arc<dyn Geometry>, f32, f32)>,
+    pub hittables: Vec<Arc<dyn Hittable + Send + Sync>>,
+    pub points_of_interest: Vec<(Arc<dyn Geometry + Send + Sync>, f32, f32)>,
     pub recursion_depth: u32,
     pub samples: u32,
     pub gamma: f32,
@@ -60,15 +60,15 @@ impl From<SceneDefinition> for Scene {
                 let h = match object.material {
                     MaterialEnum::Lambertian(lambertian) => {
                         Arc::new(Object::new(object.geometry, lambertian, object.texture))
-                            as Arc<dyn Hittable>
+                            as Arc<dyn Hittable + Send + Sync>
                     }
                     MaterialEnum::Metal(metal) => {
                         Arc::new(Object::new(object.geometry, metal, object.texture))
-                            as Arc<dyn Hittable>
+                            as Arc<dyn Hittable + Send + Sync>
                     }
                     MaterialEnum::Dielectric(dielectric) => {
                         Arc::new(Object::new(object.geometry, dielectric, object.texture))
-                            as Arc<dyn Hittable>
+                            as Arc<dyn Hittable + Send + Sync>
                     }
                 };
                 (h, w)
@@ -79,7 +79,7 @@ impl From<SceneDefinition> for Scene {
             .iter()
             .filter_map(|(h, w)| {
                 if *w > 0.0 {
-                    Some((h.clone() as Arc<dyn Geometry>, *w, 0.0))
+                    Some((h.clone() as Arc<dyn Geometry + Send + Sync>, *w, 0.0))
                 } else {
                     None
                 }
@@ -130,7 +130,7 @@ impl Scene {
                 best = Some((hit_caster, i));
             }
         }
-        best.map(|(caster, i)| (caster, self.hittables[i].as_ref(), closest))
+        best.map(|(caster, i)| (caster, self.hittables[i].as_ref() as &dyn Hittable, closest))
     }
 
     /// Density of the one-sample light-target strategy at `point` toward

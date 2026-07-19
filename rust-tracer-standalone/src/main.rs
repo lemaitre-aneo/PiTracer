@@ -3,16 +3,14 @@ extern crate sdl2;
 use ::raytracer::Scene;
 use ::raytracer::SceneDefinition;
 use clap::Parser;
-use rand::SeedableRng;
 use sdl2::event::Event;
 use sdl2::event::WindowEvent;
 use sdl2::keyboard::Keycode;
 use sdl2::rect::Rect;
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::raytracer::Raytracer;
+use crate::raytracer::{Control, ViewerEvent};
 
 mod raytracer;
 
@@ -105,8 +103,10 @@ pub fn main() -> Result<(), eyre::Report> {
 
     let sdl = sdl2::init().map_err(eyre::Report::msg)?;
     let video_subsystem = sdl.video().map_err(eyre::Report::msg)?;
-
-    let raytracer = Raytracer::new(scene, &sdl).map_err(eyre::Report::msg)?;
+    let events = sdl.event().map_err(eyre::Report::msg)?;
+    events
+        .register_custom_event::<ViewerEvent>()
+        .map_err(eyre::Report::msg)?;
 
     let window = video_subsystem
         .window("Rust Tracer", cli.width, cli.height)
@@ -119,18 +119,47 @@ pub fn main() -> Result<(), eyre::Report> {
 
     let mut event_pump = sdl.event_pump().map_err(eyre::Report::msg)?;
 
-    let mut rng = rand::rngs::StdRng::from_os_rng();
+    // The UI thread exclusively owns the displayed framebuffer; the render
+    // thread streams finished rows into it through the SDL event queue.
+    let width = cli.width as usize;
+    let height = cli.height as usize;
+    let pitch = width * 3;
+    let mut pixels = vec![0u8; pitch * height];
 
-    let mut paused = false;
-    let mut started = None;
+    let control = Control::new();
+    let render_thread = std::thread::spawn({
+        let control = control.clone();
+        let sender = events.event_sender();
+        move || crate::raytracer::render_thread(scene, control, sender)
+    });
 
-    loop {
-        let mut render = false;
-        for event in event_pump.poll_iter() {
-            if let Some(ctx) = event.as_user_event_type::<Arc<Raytracer>>() {
-                ctx.acknowledge();
-                render = true;
-                continue;
+    const PRESENT_INTERVAL: Duration = Duration::from_millis(15);
+    let mut dirty = true;
+    let mut last_present = Instant::now() - PRESENT_INTERVAL;
+
+    'running: loop {
+        // Block until something happens, then drain the whole queue so a burst
+        // of row events is coalesced into a single present.
+        let mut pending = Vec::new();
+        if let Some(event) = event_pump.wait_event_timeout(100) {
+            pending.push(event);
+            pending.extend(event_pump.poll_iter());
+        }
+
+        for event in pending {
+            // Single registered custom type: extract at most once per event
+            // (the payload is moved out of a raw box; never clone user events).
+            match event.as_user_event_type::<ViewerEvent>() {
+                Some(ViewerEvent::Row { y, pixels: row }) => {
+                    pixels[y * pitch..(y + 1) * pitch].copy_from_slice(&row);
+                    dirty = true;
+                    continue;
+                }
+                Some(ViewerEvent::IterationDone { iter }) => {
+                    tracing::debug!("iteration #{iter}: displayed");
+                    continue;
+                }
+                None => {}
             }
             match event {
                 Event::Window {
@@ -142,25 +171,21 @@ pub fn main() -> Result<(), eyre::Report> {
                         | WindowEvent::Restored,
                     ..
                 } => {
-                    render = true;
+                    dirty = true;
                 }
                 Event::Quit { .. }
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => {
-                    // Signal that the rendering must be stopped
                     tracing::info!("Stopping Requested");
-
-                    raytracer.stop();
-                    return Ok(());
+                    break 'running;
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Space),
                     ..
                 } => {
-                    paused = !paused;
-                    let title = if paused {
+                    let title = if control.toggle_pause() {
                         tracing::info!("Paused");
                         "Rust Tracer (paused)"
                     } else {
@@ -183,38 +208,26 @@ pub fn main() -> Result<(), eyre::Report> {
                         _ => sdl2::video::FullscreenType::Off,
                     };
                     window.set_fullscreen(state).map_err(eyre::Report::msg)?;
-                    render = true;
+                    dirty = true;
                 }
                 _ => {}
             }
         }
 
-        if Arc::strong_count(&raytracer) == 1 {
-            if raytracer.stopping() {
-                break;
-            }
-            if let Some(started) = started.take() {
-                let finished = std::time::Instant::now();
-                tracing::info!(
-                    "Iteration #{}: finished in {:#?}",
-                    raytracer.iter(),
-                    finished - started
-                );
-            }
-            if !paused {
-                started = Some(std::time::Instant::now());
-                raytracer.clone().send_process(&mut rng);
-                tracing::debug!("iteration #{}: started", raytracer.iter());
-            }
-        }
-
-        if render {
-            let surface = raytracer.get_surface().map_err(eyre::Report::msg)?;
+        if dirty && last_present.elapsed() >= PRESENT_INTERVAL {
+            let surface = sdl2::surface::Surface::from_data(
+                &mut pixels,
+                cli.width,
+                cli.height,
+                pitch as u32,
+                sdl2::pixels::PixelFormatEnum::RGB24,
+            )
+            .map_err(eyre::Report::msg)?;
             let texture = surface
                 .as_texture(&texture_creator)
                 .map_err(eyre::Report::msg)?;
 
-            let (w, h) = canvas.output_size().unwrap();
+            let (w, h) = canvas.output_size().map_err(eyre::Report::msg)?;
             let target = match (cli.width * h).cmp(&(w * cli.height)) {
                 std::cmp::Ordering::Greater => {
                     let sh = cli.height * w / cli.width;
@@ -235,10 +248,19 @@ pub fn main() -> Result<(), eyre::Report> {
                 .copy(&texture, None, target)
                 .map_err(eyre::Report::msg)?;
             canvas.present();
-        }
 
-        std::thread::sleep(Duration::from_secs_f64(1. / 30.));
+            dirty = false;
+            last_present = Instant::now();
+        }
     }
+
+    // Wind the render thread down before tearing SDL down: workers must not
+    // push into a dead queue, and a clean join instead of a mid-render return
+    // is what keeps a worker panic from aborting the process.
+    control.stop();
+    render_thread
+        .join()
+        .map_err(|_| eyre::eyre!("render thread panicked"))?;
 
     Ok(())
 }
