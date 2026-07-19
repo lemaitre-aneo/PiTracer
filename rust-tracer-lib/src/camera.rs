@@ -29,8 +29,14 @@ impl Default for CameraDefinition {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize)]
 #[serde(from = "CameraDefinition")]
 pub struct Camera {
-    pub origin: Vector,
+    /// Eye point (world coordinates): every ray converges here.
     reference: Vector,
+    /// Pixel (0, 0) corner of the image plane, relative to `reference`.
+    /// Camera-local (image-plane magnitude, ~0.1) so that sub-pixel offsets
+    /// keep full f32 resolution: summed at world scale instead, jitter
+    /// rounds to ~0.07 pixel at |origin| ≈ 300 and a full pixel at ≈ 3000,
+    /// collapsing anti-aliasing.
+    corner: Vector,
     u: Vector,
     v: Vector,
     pub width: u32,
@@ -42,7 +48,8 @@ impl From<CameraDefinition> for Camera {
         let pixel_size = definition.world_height / definition.height as f32;
         let reference_distance =
             definition.world_height * 0.5f32 / (definition.field_of_view.to_radians() / 2f32).tan();
-        let reference = definition.origin - reference_distance * definition.direction.normalized();
+        let towards = definition.direction.normalized();
+        let reference = definition.origin - reference_distance * towards;
         const VUP: Vector = Vector {
             x: 0f32,
             y: 1f32,
@@ -55,13 +62,13 @@ impl From<CameraDefinition> for Camera {
         let u = pixel_size * definition.direction.cross(VUP).normalized();
         let v = pixel_size * u.cross(definition.direction).normalized();
 
-        let origin = definition.origin
+        let corner = reference_distance * towards
             - u * (definition.width / 2) as f32
             - v * (definition.height / 2) as f32;
 
         Self {
-            origin,
             reference,
+            corner,
             u,
             v,
             width: definition.width,
@@ -72,10 +79,13 @@ impl From<CameraDefinition> for Camera {
 
 impl Camera {
     pub fn cast(&self, x: f32, y: f32) -> (Vector, UnitVector) {
-        let origin = self.origin + x * self.u + y * self.v;
-        let direction = (origin - self.reference).normalized();
+        // Assembled camera-local: x·u and y·v are image-plane magnitudes, so
+        // the direction keeps every bit of the sub-pixel offset. Only the
+        // final origin translation touches world coordinates (its rounding
+        // shifts the ray start by ≤ ~1 ulp of the eye point — harmless).
+        let local = self.corner + x * self.u + y * self.v;
 
-        (origin, direction)
+        (self.reference + local, local.normalized())
     }
 }
 
@@ -104,13 +114,10 @@ mod test {
         let (origin, direction) = camera.cast(160f32, 120f32);
 
         assert_vec_close(origin, Vector::from((1f32, 2f32, 3f32)), 1e-6);
-        // The center-pixel origin is recovered through ±x·u ±y·v cancellation
-        // whose f32 residue is amplified by 1/reference_distance (~20× here),
-        // so this comparison is looser than plain f32 tolerance.
         assert_vec_close(
             Vector::from(direction),
             Vector::from(Vector::from((0.2f32, -0.4f32, 1f32)).normalized()),
-            1e-5,
+            1e-6,
         );
     }
 
@@ -166,6 +173,45 @@ mod test {
             top.y,
             bottom.y
         );
+    }
+
+    /// Sub-pixel jitter must survive far from the world origin: offsets are
+    /// applied camera-local (image-plane magnitude), never summed at world
+    /// coordinate scale — there they rounded to ~6 distinct rays per pixel
+    /// at |origin| ≈ 300 (pitracer's own coordinates) and exactly 1 at
+    /// ≈ 3000, collapsing anti-aliasing.
+    #[test]
+    fn subpixel_jitter_survives_world_coordinates() {
+        for origin in [(50f32, 52f32, 295.6f32), (3000f32, 2000f32, 1000f32)] {
+            let camera = Camera::from(CameraDefinition {
+                origin: Vector::from(origin),
+                direction: Vector::from((0.2f32, -0.4f32, 1f32)),
+                ..Default::default()
+            });
+
+            // 100 sub-pixel steps across one pixel: every direction distinct
+            let directions: Vec<Vector> = (0..100)
+                .map(|i| Vector::from(camera.cast(160f32 + i as f32 / 100f32, 120.5f32).1))
+                .collect();
+            for pair in directions.windows(2) {
+                assert!(
+                    pair[0] != pair[1],
+                    "sub-pixel jitter collapsed at origin {origin:?}"
+                );
+            }
+        }
+
+        // sanity anchor: one horizontal pixel at the center subtends
+        // atan(pixel/reference) = atan(2·tan(fov/2)/height), fov 90 ⇒ 1/120
+        let camera = Camera::from(CameraDefinition {
+            origin: Vector::from((3000f32, 2000f32, 1000f32)),
+            direction: Vector::from((0.2f32, -0.4f32, 1f32)),
+            ..Default::default()
+        });
+        let first = camera.cast(160f32, 120f32).1;
+        let last = camera.cast(161f32, 120f32).1;
+        let sin_angle = first.cross(last).norm();
+        assert_close(sin_angle, (1f64 / 120f64).atan().sin(), 2e-6);
     }
 
     #[test]
