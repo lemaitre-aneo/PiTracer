@@ -49,8 +49,11 @@ impl From<CameraDefinition> for Camera {
             z: 0f32,
         };
 
-        let u = pixel_size * VUP.cross(definition.direction).normalized();
-        let v = pixel_size * definition.direction.cross(u).normalized();
+        // Right-handed basis: u = d × VUP points viewer-right (world +X for a
+        // −Z camera), v = u × d points up. Pixel y is bottom-up; presenters
+        // flip rows.
+        let u = pixel_size * definition.direction.cross(VUP).normalized();
+        let v = pixel_size * u.cross(definition.direction).normalized();
 
         let origin = definition.origin
             - u * (definition.width / 2) as f32
@@ -101,10 +104,13 @@ mod test {
         let (origin, direction) = camera.cast(160f32, 120f32);
 
         assert_vec_close(origin, Vector::from((1f32, 2f32, 3f32)), 1e-6);
+        // The center-pixel origin is recovered through ±x·u ±y·v cancellation
+        // whose f32 residue is amplified by 1/reference_distance (~20× here),
+        // so this comparison is looser than plain f32 tolerance.
         assert_vec_close(
             Vector::from(direction),
             Vector::from(Vector::from((0.2f32, -0.4f32, 1f32)).normalized()),
-            1e-6,
+            1e-5,
         );
     }
 
@@ -128,6 +134,38 @@ mod test {
                     .to_degrees();
             assert_close(left.dot(right).acos().to_degrees(), expected, 1e-5);
         }
+    }
+
+    /// Chirality: for a −Z camera with VUP = +Y, increasing pixel x must tilt
+    /// rays toward world +X (viewer-right) and increasing pixel y toward
+    /// world +Y (pixel rows are bottom-up; presenters flip). A left-handed
+    /// basis passes every angle/normalization test but mirrors the image.
+    #[test]
+    fn basis_is_right_handed() {
+        let camera = Camera::from(CameraDefinition {
+            direction: Vector::from((0f32, 0f32, -1f32)),
+            ..Default::default()
+        });
+        let center_x = camera.width as f32 / 2f32;
+        let center_y = camera.height as f32 / 2f32;
+
+        let right = Vector::from(camera.cast(camera.width as f32, center_y).1);
+        let left = Vector::from(camera.cast(0f32, center_y).1);
+        assert!(
+            right.x > 0f32 && left.x < 0f32,
+            "screen-right must be world +X, got right.x = {}, left.x = {}",
+            right.x,
+            left.x
+        );
+
+        let top = Vector::from(camera.cast(center_x, camera.height as f32).1);
+        let bottom = Vector::from(camera.cast(center_x, 0f32).1);
+        assert!(
+            top.y > 0f32 && bottom.y < 0f32,
+            "high pixel y must be world +Y, got top.y = {}, bottom.y = {}",
+            top.y,
+            bottom.y
+        );
     }
 
     #[test]
