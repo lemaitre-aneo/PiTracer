@@ -566,12 +566,16 @@ mod test {
             previous = value;
         }
 
-        let mut definition = SceneDefinition::default();
-        definition.gamma = 1f32;
-        definition.camera.direction = Vector::from((0f32, 0f32, 1f32));
-        let linear = Scene::from(definition);
-        assert_eq!(linear.to_u8(0.5f32), 128);
+        let linear = Scene::from(SceneDefinition {
+            gamma: 1f32,
+            camera: CameraDefinition {
+                direction: (0f32, 0f32, 1f32).into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
+        assert_eq!(linear.to_u8(0.5f32), 128);
         assert_eq!(scene.to_u8_color(Color::splat(2f32)), [255; 3]);
         assert_eq!(scene.to_u8_color(Color::splat(-1f32)), [0; 3]);
     }

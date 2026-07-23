@@ -183,6 +183,7 @@ pub(crate) fn chi2_crit_999(df: usize) -> f64 {
 /// Also asserts the support: no sample may fall below `z_min` (within f32
 /// rounding slack).
 #[track_caller]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn chi2_directions(
     n: usize,
     rng: &mut SmallRng,
@@ -252,8 +253,8 @@ pub(crate) fn assert_sampler_matches_pdf(
     pdf: impl Fn(UnitVector) -> f32,
 ) {
     let t = tangent(axis);
-    let probes: Vec<(&str, Box<dyn Fn(UnitVector) -> f64>)> = vec![
-        ("1", Box::new(|_| 1f64)),
+    let probes = [
+        ("1", Box::new(|_| 1f64) as Box<dyn Fn(UnitVector) -> f64>),
         ("z", Box::new(move |w| f64::from(w.dot(axis)))),
         ("z²", Box::new(move |w| f64::from(w.dot(axis)).powi(2))),
         ("exp(z)", Box::new(move |w| f64::from(w.dot(axis)).exp())),
