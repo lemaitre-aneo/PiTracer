@@ -34,7 +34,7 @@ pub struct Camera {
     /// Pixel (0, 0) corner of the image plane, relative to `reference`.
     /// Camera-local (image-plane magnitude, ~0.1) so that sub-pixel offsets
     /// keep full f32 resolution: summed at world scale instead, jitter
-    /// rounds to ~0.07 pixel at |origin| ≈ 300 and a full pixel at ≈ 3000,
+    /// rounds to ~0.07 pixel at |origin| ~ 300 and a full pixel at ~3000,
     /// collapsing anti-aliasing.
     corner: Vector,
     u: Vector,
@@ -56,8 +56,8 @@ impl From<CameraDefinition> for Camera {
             z: 0f32,
         };
 
-        // Right-handed basis: u = d × VUP points viewer-right (world +X for a
-        // −Z camera), v = u × d points up. Pixel y is bottom-up; presenters
+        // Right-handed basis: u = d x VUP points viewer-right (world +X for a
+        // -Z camera), v = u x d points up. Pixel y is bottom-up; presenters
         // flip rows.
         let u = pixel_size * definition.direction.cross(VUP).normalized();
         let v = pixel_size * u.cross(definition.direction).normalized();
@@ -79,10 +79,10 @@ impl From<CameraDefinition> for Camera {
 
 impl Camera {
     pub fn cast(&self, x: f32, y: f32) -> (Vector, UnitVector) {
-        // Assembled camera-local: x·u and y·v are image-plane magnitudes, so
+        // Assembled camera-local: x*u and y*v are image-plane magnitudes, so
         // the direction keeps every bit of the sub-pixel offset. Only the
         // final origin translation touches world coordinates (its rounding
-        // shifts the ray start by ≤ ~1 ulp of the eye point — harmless).
+        // shifts the ray start by ~1 ulp of the eye point: harmless).
         let local = self.corner + x * self.u + y * self.v;
 
         (self.reference + local, local.normalized())
@@ -123,7 +123,7 @@ mod test {
 
     /// The rays through the two vertical image edges (at the horizontal
     /// center) must subtend exactly `field_of_view`; horizontally, square
-    /// pixels give 2·atan(tan(fov/2)·width/height).
+    /// pixels give 2 * atan(tan(fov/2) * width/height).
     #[test]
     fn vertical_fov_exact() {
         for fov in [60f32, 90f32, 120f32] {
@@ -143,7 +143,7 @@ mod test {
         }
     }
 
-    /// Chirality: for a −Z camera with VUP = +Y, increasing pixel x must tilt
+    /// Chirality: for a -Z camera with VUP = +Y, increasing pixel x must tilt
     /// rays toward world +X (viewer-right) and increasing pixel y toward
     /// world +Y (pixel rows are bottom-up; presenters flip). A left-handed
     /// basis passes every angle/normalization test but mirrors the image.
@@ -177,9 +177,9 @@ mod test {
 
     /// Sub-pixel jitter must survive far from the world origin: offsets are
     /// applied camera-local (image-plane magnitude), never summed at world
-    /// coordinate scale — there they rounded to ~6 distinct rays per pixel
-    /// at |origin| ≈ 300 (pitracer's own coordinates) and exactly 1 at
-    /// ≈ 3000, collapsing anti-aliasing.
+    /// coordinate scale, where they rounded to ~6 distinct rays per pixel
+    /// at |origin| ~ 300 (pitracer's own coordinates) and exactly 1 at
+    /// ~3000, collapsing anti-aliasing.
     #[test]
     fn subpixel_jitter_survives_world_coordinates() {
         for origin in [(50f32, 52f32, 295.6f32), (3000f32, 2000f32, 1000f32)] {
@@ -202,7 +202,7 @@ mod test {
         }
 
         // sanity anchor: one horizontal pixel at the center subtends
-        // atan(pixel/reference) = atan(2·tan(fov/2)/height), fov 90 ⇒ 1/120
+        // atan(pixel/reference) = atan(2*tan(fov/2)/height); fov 90 => 1/120
         let camera = Camera::from(CameraDefinition {
             origin: Vector::from((3000f32, 2000f32, 1000f32)),
             direction: Vector::from((0.2f32, -0.4f32, 1f32)),
@@ -227,8 +227,8 @@ mod test {
             assert_close(Vector::from(direction).norm2(), 1f32, 1e-6);
         }
 
-        // a vertical sweep of directions is a planar fan of < 180°: the
-        // component along the fan axis must be strictly monotone in y
+        // a vertical sweep of directions is a planar fan of < 180 degrees:
+        // the component along the fan axis must be strictly monotone in y
         let first = camera.cast(160f32, 0f32).1;
         let last = camera.cast(160f32, 240f32).1;
         let axis = (last - first).normalized();

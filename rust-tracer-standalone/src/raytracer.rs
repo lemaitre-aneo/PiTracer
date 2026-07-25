@@ -24,7 +24,7 @@ use sdl2::event::EventSender;
 /// This is the single registered custom event type: the main loop extracts the
 /// payload exactly once per received event with
 /// `Event::as_user_event_type::<ViewerEvent>()`. Never clone a user event and
-/// never extract twice — the payload is moved out of a raw box.
+/// never extract twice: the payload is moved out of a raw box.
 pub enum ViewerEvent {
     /// One finished row of pixels (tight `width * 3` RGB24 bytes).
     Row { y: usize, pixels: Vec<u8> },
@@ -123,7 +123,7 @@ pub fn render_thread(scene: Scene, control: Arc<Control>, sender: EventSender) {
     let width = scene.camera.width as usize;
     let height = scene.camera.height as usize;
     // Per-(iteration, row) rngs are seeded through SplitMix (`seed_from_u64`),
-    // never from raw constant state — see the test-suite seeding convention.
+    // never from raw constant state; see the test-suite seeding convention.
     let seed_base = rand::rngs::StdRng::from_os_rng().random::<u64>();
 
     let mut radiance = vec![0f32; width * 3 * height];
@@ -138,7 +138,7 @@ pub fn render_thread(scene: Scene, control: Arc<Control>, sender: EventSender) {
         // par_bridge (not par_chunks_mut): workers pull the NEXT row from one
         // ordered queue instead of splitting the image into per-worker
         // regions, so rows complete top-to-bottom with only thread-skew
-        // reordering — the intended progressive feel. The serialized pull is
+        // reordering -- the intended progressive feel. The serialized pull is
         // one lock per row, noise against a row's render cost.
         radiance
             .chunks_mut(width * 3)
@@ -178,7 +178,7 @@ mod test {
     };
 
     /// Camera enclosed in a purely emissive sphere: every sample of every
-    /// pixel is exactly E = (0.25, 0.5, 0.75) — deterministic rows.
+    /// pixel is exactly E = (0.25, 0.5, 0.75); deterministic rows.
     fn test_scene() -> Scene {
         Scene::from(SceneDefinition {
             camera: CameraDefinition {

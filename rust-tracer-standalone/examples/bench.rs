@@ -6,14 +6,14 @@
 //!   ... append `calib` for a 4-config subset.
 //!
 //! `samples` mode: render `spp` independent paths of every pixel; report the
-//! per-sample variance V (mean over pixels/channels) and derive the equal-time
-//! quality MSE@1s = V·τ (τ = time per full-image sample).
+//! per-sample variance V (mean over pixels/channels) and derive the
+//! equal-time quality MSE@1s = V*tau (tau = time per full-image sample).
 //!
-//! `time` mode (the direct test): render each estimator for a fixed wall-clock
-//! budget and measure the RMSE of the resulting image against a converged NEE
-//! reference — the reference's own variance is subtracted so it does not bias
-//! the comparison. This measures convergence-per-second without assuming
-//! MSE = V/n, and catches any estimator bias.
+//! `time` mode (the direct test): render each estimator for a fixed
+//! wall-clock budget and measure the RMSE of the resulting image against a
+//! converged NEE reference; the reference's own variance is subtracted so it
+//! does not bias the comparison. This measures convergence-per-second without
+//! assuming MSE = V/n, and catches any estimator bias.
 
 use std::time::Instant;
 
@@ -239,8 +239,9 @@ fn render_for_time(
     }
     let elapsed = start.elapsed().as_secs_f64();
 
-    // Bias-corrected MSE: E[(mean-ref)²] = var(mean) + var(ref); subtract the
-    // known reference variance to recover var(mean) = the estimator's own MSE.
+    // Bias-corrected MSE: E[(mean - ref)^2] = var(mean) + var(ref); subtract
+    // the known reference variance to recover var(mean), the estimator's own
+    // MSE.
     let mut mse = 0f64;
     for i in 0..npix {
         let mut e = 0f64;

@@ -41,8 +41,9 @@ struct Config {
 async fn main() -> Result<(), eyre::Report> {
     let env_filter = tracing_subscriber::EnvFilter::from_default_env();
     tracing_subscriber::registry()
-        // Print only events matching the env filter,
-        // but record without printing all spans regardless of there level to give context to events
+        // Print only events matching the env filter, but record (without
+        // printing) all spans regardless of their level, so events keep
+        // their span context.
         .with(
             tracing_subscriber::fmt::layer()
                 .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
@@ -153,11 +154,11 @@ async fn wait_terminate() {
 
     loop {
         match signals.next().await {
-            // One of the signal triggered -> stop waiting
+            // a signal fired: stop waiting
             Some(Some(())) => break,
-            // One of the signal handler has been stopped -> continue waiting for the others
+            // this handler was shut down: keep waiting on the others
             Some(None) => (),
-            // No more signal handlers are available, so wait indefinitely
+            // no signal handler could be registered: wait indefinitely
             None => futures::future::pending::<()>().await,
         }
     }
@@ -190,7 +191,7 @@ macro_rules! win_signal {
     }
 }
 
-/// Wait for termination signal (either SIGINT or SIGTERM)
+/// Wait for a termination signal (Ctrl+C, close, logoff, or shutdown).
 #[cfg(windows)]
 async fn wait_terminate() {
     win_signal!(ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown);

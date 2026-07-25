@@ -9,28 +9,24 @@ pub struct Lambertian {}
 
 impl<R: crate::Rng + ?Sized> Material<R> for Lambertian {
     fn scatter(&self, _direction: UnitVector, hit: Hit, rng: &mut R) -> Option<UnitVector> {
-        // Some(UnitVector::random_hemisphere(hit.normal, rng))
-        // Some((hit.normal + UnitVector::random(rng)).normalized())
+        // Cosine sampling is load-bearing, not a variance tweak: the renderer
+        // multiplies throughput by the albedo alone, which is only correct
+        // when p = cos(theta)/pi (see the ground-truth note below).
         Some(UnitVector::random_cosine(hit.normal, rng))
     }
 
     fn pdf(&self, _direction: UnitVector, hit: Hit, scattered: UnitVector) -> f32 {
+        // cos(theta)/pi above the horizon; the max clamps below-horizon
+        // directions to 0.
         let cost = scattered.dot(hit.normal);
         (cost * std::f32::consts::FRAC_1_PI).max(0f32)
-        // 0.5 / std::f32::consts::PI
-        // let cost = hit.normal.dot(scattered);
-        // if cost > 0f32 {
-        //     cost / std::f32::consts::PI
-        // } else {
-        //     0f32
-        // }
     }
 }
 
 // Ground truth: the BRDF-sampling path tracer multiplies the throughput by
 // the albedo only, which is unbiased iff the scatter density is exactly
-// p(ω) = cos θ / π (then f·cosθ/p = (ρ/π)·cosθ/(cosθ/π) = ρ). MIS additionally
-// requires pdf() to return the true density of scatter().
+// p(w) = cos(theta)/pi (then f*cos/p = (rho/pi)*cos/(cos/pi) = rho). MIS
+// additionally requires pdf() to return the true density of scatter().
 #[cfg(test)]
 mod test {
     use std::f32::consts::PI;
@@ -73,7 +69,7 @@ mod test {
         let hit = hit_at(Vector::default(), normal, true);
         let incoming = at_angle(-normal, 0.5f64);
 
-        // pdf(ω) = cos θ / π at θ = 0°, 60°, 89.9°; 0 below the horizon
+        // pdf(w) = cos(theta)/pi at 0, 60, 89.9 degrees; 0 below the horizon
         assert_close(MATERIAL.pdf(incoming, hit, normal), 1f32 / PI, 1e-6);
         assert_close(
             MATERIAL.pdf(incoming, hit, at_angle(normal, 60f64.to_radians())),
@@ -105,8 +101,8 @@ mod test {
     }
 
     /// scatter() must be distributed according to pdf(), independently of the
-    /// incoming direction, and match the absolute anchor E[ω·n] = 2/3 of the
-    /// cosine density (see vector.rs for the derivation).
+    /// incoming direction, and match the absolute anchor E[dot(w, n)] = 2/3
+    /// of the cosine density (see vector.rs for the derivation).
     #[test]
     fn scatter_matches_pdf() {
         let normal = Vector::from((0.5f32, 1f32, -0.25f32)).normalized();

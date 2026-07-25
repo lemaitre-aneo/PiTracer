@@ -59,10 +59,11 @@ mod test {
         }
     }
 
-    /// Fuzz model: scattered = normalize(mirror + fuzziness·u) with |u| = 1,
-    /// so the angle to the mirror direction is at most asin(fuzziness):
-    /// scattered·mirror ≥ √(1 − fuzziness²). The distribution inside the cone
-    /// is a modeling choice; only the bound is spec.
+    /// Fuzz model: scattered = normalize(mirror + fuzziness * u) with
+    /// |u| = 1, so the angle to the mirror direction is at most
+    /// asin(fuzziness): dot(scattered, mirror) >= sqrt(1 - fuzziness^2). The
+    /// distribution inside the cone is a modeling choice; only the bound is
+    /// spec.
     #[test]
     fn fuzz_cone_bound() {
         let mut rng = rng(seeds()[1]);

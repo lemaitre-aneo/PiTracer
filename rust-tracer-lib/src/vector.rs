@@ -51,9 +51,15 @@ pub struct Vector<T = f32> {
 
 pub type VectorVec = Vec<Vector>;
 
+/// Direction with unit norm by construction (`Vector::normalized`, the axis
+/// constants, or the exact-norm `TryFrom`); derefs to `Vector` for reads, so
+/// `norm`/`norm2` short-circuit to 1.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct UnitVector<T = f32>(Vector<T>);
 
+// Componentwise operator impls over every Vector/UnitVector/f32 pairing. The
+// assign form is the primitive; the value forms are derived from it and
+// always return a plain Vector (arithmetic does not preserve unit norm).
 macro_rules! impl_op {
     ($op:ident($opassign:ident): $trait:ident($traitassign:ident): $assign:tt) => {
         impl_op!($opassign(Vector, f32): $traitassign: $assign);
@@ -251,6 +257,8 @@ impl UnitVector {
     pub fn reflect(self, normal: UnitVector) -> UnitVector {
         UnitVector(self.0.reflect(normal))
     }
+    /// Uniform on the sphere: rejection-sample the unit ball (excluding tiny
+    /// norms whose normalization would amplify component noise), normalize.
     pub fn random<R: rand::Rng + ?Sized>(rng: &mut R) -> UnitVector {
         loop {
             let v = Vector {
@@ -270,6 +278,9 @@ impl UnitVector {
         crate::select(vec.dot(normal) > 0f32, vec, -vec)
     }
 
+    /// Cosine-weighted direction around local +z, p(w) = cos(theta)/pi: a
+    /// uniform point on the unit disk (r = sqrt(r2)) lifted onto the
+    /// hemisphere (z = sqrt(1 - r^2)).
     pub fn random_cosine_local<R: rand::Rng + ?Sized>(rng: &mut R) -> UnitVector {
         let r1 = rng.random::<f32>();
         let r2 = rng.random::<f32>();
@@ -283,6 +294,8 @@ impl UnitVector {
         UnitVector(Vector { x, y, z })
     }
 
+    /// [`random_cosine_local`](Self::random_cosine_local) rotated so local +z
+    /// lands on `normal`.
     pub fn random_cosine<R: rand::Rng + ?Sized>(normal: UnitVector, rng: &mut R) -> UnitVector {
         UnitVector(Onb::new(normal).transform(UnitVector::random_cosine_local(rng).0))
     }
@@ -307,7 +320,7 @@ mod test {
     }
 
     /// Reflection off a plane with unit normal n is the Householder map
-    /// r = v - 2(v·n)n: an isometric involution that flips the normal
+    /// r = v - 2*(v dot n)*n: an isometric involution that flips the normal
     /// component and preserves the tangential one.
     #[test]
     fn reflect_involution_and_norm() {
@@ -348,13 +361,13 @@ mod test {
             }
             let u = v.normalized();
             assert_close(Vector::from(u).norm2(), 1f32, 1e-6);
-            // same direction: u·v == |v|
+            // same direction: dot(u, v) == |v|
             assert_close(u.dot(v), v.norm(), 1e-5);
         }
     }
 
-    /// UnitVector::random must be uniform on the sphere: density 1/4π,
-    /// so E[ωᵢ] = 0, E[ωᵢ²] = 1/3, E[ωᵢωⱼ] = 0 (i≠j).
+    /// UnitVector::random must be uniform on the sphere: density 1/(4*pi),
+    /// so E[w_i] = 0, E[w_i^2] = 1/3, E[w_i*w_j] = 0 (i != j).
     #[test]
     fn unit_random_is_uniform_sphere() {
         for seed in seeds() {
@@ -415,10 +428,10 @@ mod test {
         }
     }
 
-    /// Cosine-weighted hemisphere sampling has density p(ω) = z/π (z ≥ 0), so
-    /// E[z^k] = ∫ z^k (z/π) dω = 2/(k+2): E[z] = 2/3, E[z²] = 1/2, and by
-    /// symmetry E[x] = E[y] = 0, E[x²] = E[y²] = (1 - E[z²])/2 = 1/4.
-    /// The z-slice [z0, z1] carries probability z1² - z0².
+    /// Cosine-weighted hemisphere sampling has density p(w) = z/pi (z >= 0),
+    /// so E[z^k] = 2/(k+2): E[z] = 2/3, E[z^2] = 1/2, and by symmetry
+    /// E[x] = E[y] = 0, E[x^2] = E[y^2] = (1 - E[z^2])/2 = 1/4.
+    /// The z-slice [z0, z1] carries probability z1^2 - z0^2.
     #[test]
     fn random_cosine_local_matches_cosine_density() {
         for seed in seeds() {
@@ -450,8 +463,9 @@ mod test {
         );
     }
 
-    /// Same distribution around arbitrary (non-axis) normals, with z := ω·n.
-    /// This closes the local-sample + ONB-transform loop end to end.
+    /// Same distribution around arbitrary (non-axis) normals, with
+    /// z := dot(w, n). This closes the local-sample + ONB-transform loop end
+    /// to end.
     #[test]
     fn random_cosine_respects_normal() {
         let normals = [
@@ -492,8 +506,8 @@ mod test {
         );
     }
 
-    /// Uniform hemisphere sampling has density 1/2π on {ω·n ≥ 0}, so
-    /// E[z^k] = ∫₀¹ z^k dz = 1/(k+1): E[z] = 1/2, E[z²] = 1/3.
+    /// Uniform hemisphere sampling has density 1/(2*pi) on dot(w, n) >= 0, so
+    /// E[z^k] = 1/(k+1): E[z] = 1/2, E[z^2] = 1/3.
     #[test]
     fn random_hemisphere_is_uniform_hemisphere() {
         let normal = Vector::from((1f32, 2f32, 3f32)).normalized();
@@ -524,7 +538,7 @@ mod test {
         );
     }
 
-    /// Heavy tier: same goodness-of-fit checks with 10× the samples and a
+    /// Heavy tier: same goodness-of-fit checks with 10x the samples and a
     /// finer grid. Run with `cargo test -p rust-tracer-lib -- --ignored`.
     #[test]
     #[ignore = "heavy convergence tier"]

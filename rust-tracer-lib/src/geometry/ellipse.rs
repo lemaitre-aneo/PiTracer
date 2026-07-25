@@ -30,29 +30,30 @@ mod definition {
 }
 
 /// Ellipse: center `position` (C) and semi-axis vectors `u`, `v`; surface
-/// points are C + α·u + β·v with α² + β² ≤ 1 (the boundary passes through
-/// C ± u and C ± v). The semi-axes need not be orthogonal: the shape is the
-/// affine image of the unit disk, with area π·|u × v|. Two-sided (the hit
-/// normal opposes the incident ray, like every geometry).
+/// points are C + alpha*u + beta*v with alpha^2 + beta^2 <= 1 (the boundary
+/// passes through C +/- u and C +/- v). The semi-axes need not be orthogonal:
+/// the shape is the affine image of the unit disk, with area pi*|u x v|.
+/// Two-sided (the hit normal opposes the incident ray, like every geometry).
 ///
-/// Plane quantities are cached at construction — the definition/runtime split
+/// Plane quantities are cached at construction; the definition/runtime split
 /// keeps the fields consistent by making [`Ellipse::new`] (or serde) the only
-/// way to build one. A degenerate ellipse (u × v vanishing or non-finite,
+/// way to build one. A degenerate ellipse (u x v vanishing or non-finite,
 /// which includes `Ellipse::default()`) stores `area = 0` and is inert: never
-/// hit, never sampled, never NaN — the safe failure mode for a YAML entry
-/// whose semi-axes were mistyped away.
+/// hit, never sampled, never NaN. That is the safe failure mode for a YAML
+/// entry whose semi-axes were mistyped away.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(from = "definition::Ellipse", into = "definition::Ellipse")]
 pub struct Ellipse {
     position: Vector,
     u: Vector,
     v: Vector,
-    /// normalize(u × v); arbitrary placeholder when `area == 0`.
+    /// normalize(u x v); arbitrary placeholder when `area == 0`.
     normal: UnitVector,
-    /// (u × v)/|u × v|²: dotted with p × v and u × p it yields (α, β).
+    /// (u x v) / |u x v|^2: dotted with p x v and u x p it yields
+    /// (alpha, beta).
     w: Vector,
-    /// π·|u × v| — the π is baked in so target_pdf's t²/(area·|cos θ|) stays
-    /// the plain solid-angle conversion of uniform-area sampling.
+    /// pi*|u x v|; the pi is baked in so target_pdf's t^2 / (area * |cos|)
+    /// stays the plain solid-angle conversion of uniform-area sampling.
     area: f32,
     /// |C| + |u| + |v| bounds the coordinate magnitude of every point on the
     /// ellipse: the scale the hit guard and spawn offset are relative to (the
@@ -99,14 +100,14 @@ impl Ellipse {
         if denom == 0f32 {
             return None;
         }
-        // Subtract-then-dot mirrors the sphere's oc = C − O: for an
+        // Subtract-then-dot mirrors the sphere's oc = C - O: for an
         // axis-aligned disk the signed plane distance is one exact f32
-        // subtraction; caching n̂·C would trade that for a cancellation.
+        // subtraction; caching dot(n, C) would trade that for a cancellation.
         let s = self.normal.dot(self.position - origin);
         let t = s / denom;
 
         // Relative guard against re-hitting the plane an origin numerically
-        // sits on — same rationale as the quad's (see quad.rs); grazing is
+        // sits on; same rationale as the quad's (see quad.rs). Grazing is
         // Hit::spawn's job. `!(>)` also rejects a NaN t.
         if !(t > crate::HIT_EPSILON_REL * self.scale) {
             return None;
@@ -116,7 +117,7 @@ impl Ellipse {
         let alpha = self.w.dot(p.cross(self.v));
         let beta = self.w.dot(self.u.cross(p));
         // Interior of the affine unit disk; `!(<=)` rejects NaN coordinates
-        // (t = ∞ from a near-parallel denominator ends up here).
+        // (t = inf from a near-parallel denominator ends up here).
         if !(alpha * alpha + beta * beta <= 1f32) {
             return None;
         }
@@ -127,11 +128,12 @@ impl Ellipse {
         let Some(t) = self.hit(origin, scattered) else {
             return 0f32;
         };
-        // Uniform-area sampling seen in solid angle: p(ω) = t²/(A·|cos θ|),
-        // A = π·|u × v|. hit() succeeding implies cos θ ≠ 0, so the density
-        // is finite; it is 0 for every direction hit() rejects — including
-        // the in-plane pencil from a shading point on the ellipse itself
-        // (measure-zero; the NEE direct term skips it via its pl > 0 gate).
+        // Uniform-area sampling seen in solid angle: p(w) = t^2 / (A * |cos|)
+        // with A = pi*|u x v|. hit() succeeding implies cos != 0, so the
+        // density is finite; it is 0 for every direction hit() rejects,
+        // including the in-plane pencil from a shading point on the ellipse
+        // itself (measure-zero; the NEE direct term skips it via its pl > 0
+        // gate).
         t * t / (self.area * scattered.dot(self.normal).abs())
     }
 }
@@ -156,7 +158,7 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Ellipse {
     fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit {
         let point = origin + distance * direction;
         // Same crossing-direction convention as the sphere: `front` means the
-        // ray came from the side the geometric normal (u × v) points toward.
+        // ray came from the side the geometric normal (u x v) points toward.
         let front = direction.dot(self.normal) < 0f32;
         let normal = select(front, self.normal, -self.normal);
 
@@ -170,7 +172,7 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Ellipse {
             point,
             normal,
             front,
-            // Disk coordinates in [−1, 1]: (0, 0) at the center, ±1 on the
+            // Disk coordinates in [-1, 1]: (0, 0) at the center, +/-1 on the
             // boundary along each semi-axis.
             u: alpha,
             v: beta,
@@ -185,9 +187,9 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Ellipse {
         if !(self.area > 0f32) {
             return UnitVector::default();
         }
-        // Uniform over the ellipse: uniform on the unit disk (r = √r1 makes
-        // the radial density linear), then the affine map C + α·u + β·v,
-        // which preserves area-uniformity.
+        // Uniform over the ellipse: uniform on the unit disk (r = sqrt(r1)
+        // makes the radial density linear), then the affine map
+        // C + alpha*u + beta*v, which preserves area-uniformity.
         let r = rng.random::<f32>().sqrt();
         let phi = 2f32 * std::f32::consts::PI * rng.random::<f32>();
         let alpha = r * phi.cos();
@@ -223,12 +225,13 @@ mod test {
         )
     }
 
-    /// Ray–ellipse ground truth: the plane hit is t = n̂·(C−O)/(n̂·d̂), inside
-    /// iff α² + β² ≤ 1; aiming at a known surface point makes the expected
-    /// distance simply |aim − origin| (f64).
+    /// Ray-ellipse ground truth: the plane hit is
+    /// t = dot(n, C - O) / dot(n, d), inside iff alpha^2 + beta^2 <= 1;
+    /// aiming at a known surface point makes the expected distance simply
+    /// |aim - origin| (f64).
     #[test]
     fn hit_distances_analytic() {
-        // semi-axes 2 (x) and 4 (y) in the plane z = 5, centered at (1, −1)
+        // semi-axes 2 (x) and 4 (y) in the plane z = 5, centered at (1, -1)
         let ellipse = ellipse_at((1f32, -1f32, 5f32), (2f32, 0f32, 0f32), (0f32, 4f32, 0f32));
         let origin = Vector::default();
         let z = UnitVector::Z;
@@ -247,7 +250,7 @@ mod test {
         assert_close(t, 30f64.sqrt(), 1e-6);
 
         // THE quad-vs-ellipse discriminator: inside the bounding
-        // parallelogram but outside the disk (α² + β² = 1.62 > 1)
+        // parallelogram but outside the disk (alpha^2 + beta^2 = 1.62 > 1)
         let aim = Vector::from((1f32, -1f32, 5f32))
             + 0.9f32 * Vector::from((2f32, 0f32, 0f32))
             + 0.9f32 * Vector::from((0f32, 4f32, 0f32));
@@ -278,11 +281,11 @@ mod test {
     }
 
     /// Pins the hit conventions materials rely on (normal opposes the ray,
-    /// `front` = came from the u×v side) and the (α, β) disk parametrization,
-    /// including a sheared (non-orthogonal semi-axes) case.
+    /// `front` = came from the u x v side) and the (alpha, beta) disk
+    /// parametrization, including a sheared (non-orthogonal semi-axes) case.
     #[test]
     fn to_hit_normal_orientation_and_uv() {
-        // u × v = +Z for this ellipse
+        // u x v = +Z for this ellipse
         let ellipse = ellipse_at((1f32, -1f32, 5f32), (2f32, 0f32, 0f32), (0f32, 4f32, 0f32));
 
         // approaching from z < 5 travels along +Z, against the grain: back face
@@ -315,7 +318,7 @@ mod test {
         assert!(hit.normal.dot(-UnitVector::Z) < 0f32);
 
         // sheared, tilted semi-axes: aim at C + 0.3u + 0.6v (interior:
-        // 0.09 + 0.36 ≤ 1) and read back the disk coordinates
+        // 0.09 + 0.36 <= 1) and read back the disk coordinates
         let ellipse = ellipse_at((1f32, 1f32, 1f32), (1f32, 0f32, 1f32), (1f32, 1f32, 0f32));
         let aim = Vector::from((1f32, 1f32, 1f32))
             + 0.3f32 * Vector::from((1f32, 0f32, 1f32))
@@ -331,7 +334,7 @@ mod test {
     }
 
     /// An origin lying exactly in the ellipse's plane must never hit it: the
-    /// relative guard eats the t ≈ 0 root for every non-parallel direction
+    /// relative guard eats the t ~ 0 root for every non-parallel direction
     /// (parallel ones die on denom == 0).
     #[test]
     fn hit_guard_rejects_on_plane_origin() {
@@ -411,7 +414,7 @@ mod test {
 
             let extent = u.norm().min(v.norm());
             for _ in 0..50 {
-                // interior aims: (a, b) in the disk of radius 0.7·√2 ≤ 0.99
+                // interior aims: (a, b) in the disk of radius 0.7*sqrt(2) <= 0.99
                 let a = (2f32 * rng.random::<f32>() - 1f32) * 0.7f32;
                 let b = (2f32 * rng.random::<f32>() - 1f32) * 0.7f32;
                 let aim = c + a * u + b * v;
@@ -489,10 +492,11 @@ mod test {
         assert_eq!(ellipse.target_pdf(origin, UnitVector::X), 0f32);
     }
 
-    /// Uniform-area sampling in solid angle: p(ω) = t²/(π·|u×v|·|cos θ|).
-    /// For the unit disk at distance 1: head-on p = 1/π; toward (0.5, 0, 1),
-    /// t² = 1.25 and cos θ = 1/√1.25, so p = 1.25^{3/2}/π. Two-sided: the
-    /// same value approaching from behind.
+    /// Uniform-area sampling in solid angle:
+    /// p(w) = t^2 / (pi * |u x v| * |cos|). For the unit disk at distance 1:
+    /// head-on p = 1/pi; toward (0.5, 0, 1), t^2 = 1.25 and
+    /// cos = 1/sqrt(1.25), so p = 1.25^1.5 / pi. Two-sided: the same value
+    /// approaching from behind.
     #[test]
     fn target_pdf_closed_form() {
         let disk = ellipse_at((0f32, 0f32, 1f32), (1f32, 0f32, 0f32), (0f32, 1f32, 0f32));
@@ -522,8 +526,9 @@ mod test {
         );
     }
 
-    /// ∫ target_pdf dω = 1 over the sphere of directions. This also pins the
-    /// π in the area: with area = |u × v| the integral would read π.
+    /// target_pdf must integrate to 1 over the sphere of directions. This
+    /// also pins the pi in the area: with area = |u x v| the integral would
+    /// read pi.
     #[test]
     fn target_pdf_normalizes() {
         let disk = ellipse_at((0f32, 0f32, 1f32), (1f32, 0f32, 0f32), (0f32, 1f32, 0f32));
@@ -537,13 +542,14 @@ mod test {
     /// target_random must be distributed according to target_pdf.
     ///
     /// Probe-based consistency on an elliptic (unequal axes) case, which is
-    /// not φ-symmetric about any axis. Then a chi-squared goodness-of-fit on
-    /// the CIRCULAR on-axis case, which — unlike any quad — IS φ-symmetric:
+    /// not phi-symmetric about any axis. Then a chi-squared goodness-of-fit
+    /// on the CIRCULAR on-axis case, which (unlike any quad) IS phi-symmetric:
     /// for a disk of radius R at distance d on the axis, the fraction of the
-    /// (area-uniform) samples with direction cosine ≥ z is the area fraction
-    /// ρ ≤ d·tan θ, i.e. d²(1−z²)/(R²z²), giving the slice probability
-    /// bin_prob(z0, z1) = (d²/R²)·(1/z0² − 1/z1²) over the support
-    /// z ∈ [d/√(d²+R²), 1] (the full range sums to exactly 1).
+    /// (area-uniform) samples with direction cosine >= z is the area fraction
+    /// of radius <= d*tan(theta), i.e. d^2*(1 - z^2)/(R^2*z^2), giving the
+    /// slice probability bin_prob(z0, z1) = (d^2/R^2)*(1/z0^2 - 1/z1^2) over
+    /// the support z in [d/sqrt(d^2 + R^2), 1] (the full range sums to
+    /// exactly 1).
     #[test]
     fn target_sampler_matches_target_pdf() {
         let ellipse = ellipse_at((0f32, 0f32, 1f32), (2f32, 0f32, 0f32), (0f32, 1f32, 0f32));
@@ -559,7 +565,7 @@ mod test {
             |w| ellipse.target_pdf(origin, w),
         );
 
-        // circular case: R = 1 at d = 1 ⇒ z_min = 1/√2
+        // circular case: R = 1 at d = 1 => z_min = 1/sqrt(2)
         let disk = ellipse_at((0f32, 0f32, 1f32), (1f32, 0f32, 0f32), (0f32, 1f32, 0f32));
         let z_min = 1f64 / 2f64.sqrt();
         chi2_directions(

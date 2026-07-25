@@ -54,9 +54,9 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
 
         let r1 = rng.random::<f32>();
         let r2 = rng.random::<f32>();
-        // 1 − z is uniform on [0, 1 − cos θ_max]; keeping it as its own
-        // variable sidesteps the cancellations in z − 1 and 1 − z²
-        // (= u·(2 − u)) that erased small cones in f32.
+        // 1 - z is uniform on [0, 1 - cos(theta_max)]; keeping it as its own
+        // variable sidesteps the cancellations in z - 1 and 1 - z^2
+        // (= u*(2 - u)) that erased small cones in f32.
         let u = r2 * Self::one_minus_cos_max(sint2);
         let z = 1f32 - u;
         let sin_theta = (u * (2f32 - u)).sqrt();
@@ -73,11 +73,11 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
 }
 
 impl Sphere {
-    /// 1 − cos θ_max of the tangent cone, from sin²θ_max = r²/d². The naive
-    /// `1 − √(1−sint2)` cancels in f32 for small angular radii (−7% at
-    /// r/d ≈ 1e-3, 0 below ~1.7e-4, where the pdf explodes to +inf and the
-    /// sampler collapses onto the axis); this algebraically equal form keeps
-    /// full relative precision at every scale.
+    /// 1 - cos(theta_max) of the tangent cone, from sin^2(theta_max) =
+    /// r^2/d^2. The naive `1 - sqrt(1 - sint2)` cancels in f32 for small
+    /// angular radii (-7% at r/d ~ 1e-3, 0 below ~1.7e-4, where the pdf
+    /// explodes to +inf and the sampler collapses onto the axis); this
+    /// algebraically equal form keeps full relative precision at every scale.
     fn one_minus_cos_max(sint2: f32) -> f32 {
         sint2 / (1f32 + (1f32 - sint2).sqrt())
     }
@@ -90,9 +90,10 @@ impl Sphere {
         let r2 = self.radius * self.radius;
         let c = oc2 - r2;
 
-        // Vector-rejection discriminant (PBRT / Ray Tracing Gems): h² − a·c
-        // cancels catastrophically when r ≪ |oc| (a distant light is randomly
-        // missed) and near tangency; r² − |oc⊥|² compares like against like.
+        // Vector-rejection discriminant (PBRT / Ray Tracing Gems): h^2 - a*c
+        // cancels catastrophically when r << |oc| (a distant light is
+        // randomly missed) and near tangency; r^2 - |oc_perp|^2 compares like
+        // against like.
         let perp = oc - (h / a) * direction;
         let delta = a * (r2 - perp.norm2());
         if delta < 0f32 {
@@ -101,8 +102,9 @@ impl Sphere {
         let sqrtd = delta.sqrt();
 
         // Citardauq pairing: the root q/a adds same-sign quantities, and c/q
-        // recovers the other from the exact product t₀·t₁ = c/a — no
-        // (h − √Δ) cancellation (t-error 0.40 at r = 1e6 with the naive form).
+        // recovers the other from the exact product t0*t1 = c/a, avoiding the
+        // (h - sqrt(delta)) cancellation (t-error 0.40 at r = 1e6 with the
+        // naive form).
         let q = h + sqrtd.copysign(h);
         let (near, far) = if h >= 0f32 {
             (c / q, q / a)
@@ -209,21 +211,22 @@ mod test {
         }
     }
 
-    /// Analytic ray–sphere ground truth: with proj = (C−O)·d̂ and impact
-    /// parameter b (b² = |C−O|² − proj²), a forward hit exists iff b ≤ r,
-    /// at t = proj − √(r²−b²) from outside and t = proj + √(r²−b²) from inside.
+    /// Analytic ray-sphere ground truth: with proj = dot(C - O, d) and impact
+    /// parameter b (b^2 = |C - O|^2 - proj^2), a forward hit exists iff
+    /// b <= r, at t = proj - sqrt(r^2 - b^2) from outside and
+    /// t = proj + sqrt(r^2 - b^2) from inside.
     #[test]
     fn hit_distances_analytic() {
         let origin = Vector::default();
         let z = UnitVector::Z;
 
-        // head-on from outside: t = distance − radius
+        // head-on from outside: t = distance - radius
         let t = sphere_at((0f32, 0f32, 5f32), 2f32)
             .hit(origin, z)
             .expect("must hit");
         assert_close(t, 3f32, 1e-6);
 
-        // offset b = 1, proj = 5: t = 5 − √3
+        // offset b = 1, proj = 5: t = 5 - sqrt(3)
         let t = sphere_at((0f32, 1f32, 5f32), 2f32)
             .hit(origin, z)
             .expect("must hit");
@@ -240,7 +243,7 @@ mod test {
             assert_close(t, 2f32, 1e-6);
         }
 
-        // from inside: exit at t = proj + √(r²−b²)
+        // from inside: exit at t = proj + sqrt(r^2 - b^2)
         let t = sphere_at((0f32, 0f32, 5f32), 2f32)
             .hit(Vector::from((0f32, 0f32, 4f32)), z)
             .expect("must hit");
@@ -300,31 +303,31 @@ mod test {
     }
 
     /// Entering distance vs ground truth at wall scale: the naive
-    /// (h − √Δ)/a subtraction lost ~0.4 units at r = 1e6; the Citardauq
-    /// pairing must stay within f32 rounding of the true root.
+    /// (h - sqrt(delta))/a subtraction lost ~0.4 units at r = 1e6; the
+    /// Citardauq pairing must stay within f32 rounding of the true root.
     #[test]
     fn hit_distance_accurate_at_wall_scale() {
-        // head-on: r = 1e6, origin 100 above the surface — exact answer 100
+        // head-on: r = 1e6, origin 100 above the surface; exact answer 100
         let t = sphere_at((0f32, 0f32, 0f32), 1e6f32)
             .hit(Vector::from((0f32, 0f32, 1_000_100f32)), -UnitVector::Z)
             .expect("must hit");
         assert_close(t, 100f32, 1.5e-3);
 
-        // 45° onto an r = 1e5 floor — f64 reference root
+        // 45 degrees onto an r = 1e5 floor; f64 reference root
         let sphere = sphere_at((0f32, -1e5f32, 0f32), 1e5f32);
         let origin = Vector::from((0f32, 30f32, 0f32));
         let direction = Vector::from((1f32, -1f32, 0f32)).normalized();
         let t = sphere.hit(origin, direction).expect("must hit");
 
         let dy = f64::from(Vector::from(direction).y);
-        let h = dy * -100_030f64; // d·(C − O), x and z terms are 0
+        let h = dy * -100_030f64; // dot(d, C - O), x and z terms are 0
         let c = 100_030f64 * 100_030f64 - 1e10f64;
         let expected = c / (h + (h * h - c).sqrt());
         assert_close(t, expected, 5e-4);
     }
 
-    /// The naive discriminant h² − a·c cancels to rounding noise for a
-    /// distant small sphere (r ≪ |oc|): hits get missed or land a full
+    /// The naive discriminant h^2 - a*c cancels to rounding noise for a
+    /// distant small sphere (r << |oc|): hits get missed or land a full
     /// radius off. The rejection form must find them at the exact distance.
     #[test]
     fn hit_finds_far_small_spheres_exactly() {
@@ -345,8 +348,8 @@ mod test {
     }
 
     /// Transmission through a small sphere: spawned just inside the entry
-    /// point, the ray must find the exit chord. The absolute 7e-2 guard
-    /// erased it for r ≤ 0.035 (the chord itself is ≤ 0.07), killing glass
+    /// point, the ray must find the exit chord. The old absolute 7e-2 guard
+    /// erased it for r <= 0.035 (the chord itself is <= 0.07), killing glass
     /// beads entirely.
     #[test]
     fn small_sphere_exit_hit_preserved() {
@@ -365,11 +368,11 @@ mod test {
     }
 
     /// A ray spawned via Hit::spawn cannot re-intersect the surface it
-    /// leaves, at any scale and any outward angle — grazing included. This
+    /// leaves, at any scale and any outward angle, grazing included. This
     /// invariant replaces the absolute guard: grazing phantoms reach
-    /// √(2·r·δ) (≈ 45 at wall scale for δ ≈ 1e-2), beyond any usable
-    /// threshold, but an origin strictly outside a convex surface cannot
-    /// re-hit it geometrically.
+    /// sqrt(2*r*delta) (about 45 at wall scale for delta = 1e-2), beyond any
+    /// usable threshold, but an origin strictly outside a convex surface
+    /// cannot re-hit it geometrically.
     #[test]
     fn spawn_clears_own_surface() {
         let mut rng = rng(seeds()[1]);
@@ -405,8 +408,8 @@ mod test {
     }
 
     /// The offset reported by to_hit must bound the point's true distance
-    /// from the surface (measured in f64 — that is the invariant spawn
-    /// relies on) while staying far below the geometry itself.
+    /// from the surface (measured in f64; that is the invariant spawn relies
+    /// on) while staying far below the geometry itself.
     #[test]
     fn to_hit_offset_bounds_placement_noise() {
         let mut rng = rng(seeds()[2]);
@@ -447,8 +450,8 @@ mod test {
     }
 
     /// Sampling the sphere by solid angle from outside is uniform over the
-    /// cone with cos θ_max = √(1 − r²/d²): pdf = 1/(2π(1 − cos θ_max)) inside
-    /// the cone, 0 outside.
+    /// cone with cos(theta_max) = sqrt(1 - r^2/d^2):
+    /// pdf = 1 / (2*pi*(1 - cos(theta_max))) inside the cone, 0 outside.
     #[test]
     fn target_pdf_closed_form_in_cone() {
         let sphere = sphere_at((1f32, 2f32, 3f32), 1f32);
@@ -470,8 +473,9 @@ mod test {
         );
     }
 
-    /// Uniform-in-cone means z := ω·axis is uniform on [cos θ_max, 1]:
-    /// E[z] = (1+c)/2, E[z²] = (1+c+c²)/3; every sample hits the sphere.
+    /// Uniform-in-cone means z := dot(w, axis) is uniform on
+    /// [cos(theta_max), 1]: E[z] = (1 + c)/2, E[z^2] = (1 + c + c^2)/3;
+    /// every sample hits the sphere.
     #[test]
     fn target_random_within_cone_moments() {
         let sphere = sphere_at((1f32, 2f32, 3f32), 1f32);
@@ -511,7 +515,7 @@ mod test {
     }
 
     /// target_random must be distributed according to target_pdf (wide cone
-    /// so the goodness-of-fit bins fill: r = 1, d = 1.25 ⇒ c = 0.6 exactly).
+    /// so the goodness-of-fit bins fill: r = 1, d = 1.25 => c = 0.6 exactly).
     #[test]
     fn target_sampler_matches_target_pdf() {
         let sphere = sphere_at((0f32, 0f32, 1.25f32), 1f32);
@@ -541,7 +545,7 @@ mod test {
         );
     }
 
-    /// ∫ target_pdf dω = 1 over the sphere of directions.
+    /// target_pdf must integrate to 1 over the sphere of directions.
     #[test]
     fn target_pdf_normalizes() {
         let sphere = sphere_at((0f32, 0f32, 1.5f32), 1f32);
@@ -553,8 +557,8 @@ mod test {
     }
 
     /// target_pdf must track the f64 ground truth at every angular radius:
-    /// the naive `1 − √(1−sint²)` denominator cancels in f32 (−7% at
-    /// r/d ≈ 1e-3, +inf below ~1.7e-4, where the light silently vanished
+    /// the naive `1 - sqrt(1 - sint2)` denominator cancels in f32 (-7% at
+    /// r/d ~ 1e-3, +inf below ~1.7e-4, where the light silently vanished
     /// from diffuse lighting).
     #[test]
     fn target_pdf_exact_at_small_angular_radius() {
@@ -576,9 +580,9 @@ mod test {
     /// must still spread over the tangent cone instead of collapsing onto the
     /// axis. At this scale z rounds to exactly 1.0 in f32, so the spread is
     /// measured on the transverse components, which keep full relative
-    /// precision: sin²θ = (1−z)(1+z) with 1−z uniform on [0, omc] gives
-    /// E[sin²θ] = omc·(1 − omc/3) and max sin²θ = omc·(2 − omc) = sin²θ_max
-    /// exactly.
+    /// precision: sin^2 = (1 - z)(1 + z) with 1 - z uniform on [0, omc] gives
+    /// E[sin^2] = omc*(1 - omc/3) and max sin^2 = omc*(2 - omc)
+    /// = sin^2(theta_max) exactly.
     #[test]
     fn target_random_small_cone_spread() {
         let sphere = sphere_at((0f32, 0f32, 1e4f32), 1f32);
@@ -616,7 +620,7 @@ mod test {
     }
 
     /// From inside the sphere every direction hits it: the only consistent
-    /// strategy is uniform over the full sphere, pdf = 1/4π everywhere.
+    /// strategy is uniform over the full sphere, pdf = 1/(4*pi) everywhere.
     #[test]
     fn target_inside_sphere_uniform() {
         let sphere = sphere_at((1f32, 0f32, 0f32), 2f32);
@@ -652,7 +656,7 @@ mod test {
         );
     }
 
-    /// Heavy tier: cone sampler goodness-of-fit at 10× samples, finer grid.
+    /// Heavy tier: cone sampler goodness-of-fit at 10x samples, finer grid.
     #[test]
     #[ignore = "heavy convergence tier"]
     fn heavy_chi2_target_sampler() {

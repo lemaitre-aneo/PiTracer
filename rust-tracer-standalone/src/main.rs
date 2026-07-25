@@ -56,9 +56,9 @@ pub struct Cli {
     pub mixture_sampling: f32,
 
     /// Geometric decay of the mixture light probability per bounce
-    /// (c_l = mixture_sampling · decay^depth). 1.0 = constant (deep fireflies);
-    /// < 1 concentrates aiming on early bounces and bounds throughput.
-    /// Negative = use the scene file's value.
+    /// (c_l = mixture_sampling * decay^depth). 1.0 = constant (deep
+    /// fireflies); < 1 concentrates aiming on early bounces and bounds
+    /// throughput. Negative = use the scene file's value.
     #[arg(long, default_value = "-1")]
     pub mixture_decay: f32,
 }
@@ -302,9 +302,9 @@ mod test {
             .try_deserialize::<::raytracer::SceneDefinition>()
             .unwrap();
         definition.light_sampling = light_sampling;
-        // This helper feeds the NEE/PT firefly-bound test, whose 2·E·(depth+1)
-        // bound is the NEE invariant; disable the (now-default) mixture
-        // estimator so the test stays about NEE/PT.
+        // This helper feeds the NEE/PT firefly-bound test, whose
+        // 2*E*(depth+1) bound is the NEE invariant; disable the (now-default)
+        // mixture estimator so the test stays about NEE/PT.
         definition.mixture_sampling = 0.0;
         ::raytracer::Scene::from(definition)
     }
@@ -318,7 +318,7 @@ mod test {
     }
 
     /// The shipped scene must survive the whole deserialization stack (config
-    /// crate → serde flatten → the `type` tag → the geometry definition
+    /// crate -> serde flatten -> the `type` tag -> the geometry definition
     /// modules): 13 objects (ellipse light + 6 ball spheres, then 6 quad
     /// walls), the marble ball's `texture:` tag, and a spot-checked wall
     /// whose geometry and color arrived intact.
@@ -421,7 +421,7 @@ objects:
     }
 
     /// An object entry without a `type` field must be a hard parse error, not
-    /// a silent default — geometry has no sensible fallback.
+    /// a silent default: geometry has no sensible fallback.
     #[test]
     fn untyped_object_is_rejected() {
         let result = parse(
@@ -594,7 +594,7 @@ objects:
 
     /// Documented migration failure mode: the old top-level `spheres:` /
     /// `quads:` keys are unknown to `SceneDefinition` and silently dropped
-    /// (`#[serde(default)]` container) — an unmigrated file yields an empty
+    /// (`#[serde(default)]` container), so an unmigrated file yields an empty
     /// scene rather than an error. Pinned here; catalogued in BACKLOG P0.
     #[test]
     fn legacy_top_level_keys_are_dropped() {
@@ -611,7 +611,7 @@ spheres:
     }
 
     /// Regression: on the real scene, every radiance sample must be finite
-    /// and below the physical path bound 2·E_max·(depth+1) — fireflies from
+    /// and below the physical path bound 2*E_max*(depth+1). Fireflies from
     /// estimator reweighting showed up here as saturated specks.
     #[test]
     fn pitracer_radiance_finite_and_bounded() {

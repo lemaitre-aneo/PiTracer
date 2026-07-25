@@ -5,6 +5,9 @@ use crate::{
     Color, Geometry, Hit, HitCaster, Material, Texture, TextureProperty, UnitVector, Vector,
 };
 
+/// Union of the three behavior traits a scene object provides. Blanket
+/// implemented for anything satisfying all three; `Scene` stores objects as
+/// `Arc<dyn Hittable>`.
 pub trait Hittable<R: crate::Rng + ?Sized = dyn RngCore>:
     Geometry<R> + Material<R> + Texture<R> + std::fmt::Debug
 {
@@ -22,6 +25,10 @@ pub struct Radiance {
     pub direction: UnitVector,
 }
 
+/// A scene object: geometry + material + texture, each trait impl forwarding
+/// to its component. The `#[serde(flatten)]` fields make one YAML `objects:`
+/// entry carry all three aspects in a single map (geometry fields, the
+/// `material:` tag, texture keys side by side).
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Object<G, M, T> {

@@ -79,12 +79,12 @@ impl<R: crate::Rng + ?Sized> Material<R> for Dielectric {
 }
 
 // Ground truth (all derived from optics, not from the code):
-// - Snell: entering a medium of index η, sin θ_t = sin θ_i / η; the refracted
-//   ray is coplanar with (d, n), on the far side of the surface, tangentially
-//   forward. Exiting, the relative index is η and refraction is impossible
-//   beyond the critical angle θ_c = asin(1/η).
-// - Fresnel (Schlick): reflect with probability R(θ) = R₀ + (1-R₀)(1-cos θ)⁵,
-//   R₀ = ((η-1)/(η+1))².
+// - Snell: entering a medium of index eta, sin(theta_t) = sin(theta_i)/eta;
+//   the refracted ray is coplanar with (d, n), on the far side of the
+//   surface, tangentially forward. Exiting, the relative index is eta and
+//   refraction is impossible beyond the critical angle theta_c = asin(1/eta).
+// - Fresnel (Schlick): reflect with probability
+//   R(theta) = R0 + (1 - R0)*(1 - cos(theta))^5, R0 = ((eta-1)/(eta+1))^2.
 #[cfg(test)]
 mod test {
     use super::*;
@@ -105,8 +105,8 @@ mod test {
         r0 + (1f32 - r0) * (1f32 - theta.cos()).powi(5)
     }
 
-    /// Refracted rays (on the far side: t·n < 0) satisfy Snell's law and stay
-    /// in the plane of incidence.
+    /// Refracted rays (on the far side: dot(t, n) < 0) satisfy Snell's law
+    /// and stay in the plane of incidence.
     #[test]
     fn snell_angle() {
         for (theta, eta) in [
@@ -170,12 +170,12 @@ mod test {
                 assert_vec_close(Vector::from(scattered), Vector::from(mirror), 1e-7);
             }
         }
-        // R(60°) = 0.07: ~700 reflections expected in 10⁴ draws
+        // R(60 degrees) = 0.07: ~700 reflections expected in 1e4 draws
         assert!(reflected > 0, "no reflected sample in 10⁴ draws");
     }
 
-    /// Exiting the medium (relative index η), refraction is impossible when
-    /// η·sin θ > 1, i.e. beyond θ_c = asin(1/1.5) ≈ 41.81°.
+    /// Exiting the medium (relative index eta), refraction is impossible when
+    /// eta * sin(theta) > 1, i.e. beyond theta_c = asin(1/1.5) ~ 41.81 deg.
     #[test]
     fn total_internal_reflection() {
         let material: &dyn Material = &Dielectric::new(1.5f32);
@@ -191,7 +191,7 @@ mod test {
             assert_vec_close(Vector::from(scattered), Vector::from(mirror), 1e-7);
         }
 
-        // below the critical angle transmission resumes (1 - R(30°) ≈ 96%)
+        // below the critical angle transmission resumes (1 - R(30 deg) ~ 96%)
         let incoming = incident(30f32.to_radians());
         let refracted = (0..10_000)
             .filter(|_| {
@@ -205,7 +205,7 @@ mod test {
     }
 
     /// The reflect/refract branch frequency must follow the Schlick
-    /// reflectance (binomial statistics, 4σ).
+    /// reflectance (binomial statistics, 4 sigma).
     #[test]
     fn schlick_branch_statistics() {
         let eta = 1.5f32;

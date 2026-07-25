@@ -50,6 +50,8 @@ pub struct Color<T = f32> {
 
 pub type ColorVec = Vec<Color>;
 
+// Componentwise operator impls. The assign form is the primitive; the value
+// forms (Color op f32, Color op Color, f32 op Color) are derived from it.
 macro_rules! impl_op {
     ($op:ident($opassign:ident): $trait:ident($traitassign:ident): $assign:tt) => {
         impl_op!($opassign(Color, f32): $traitassign: $assign);

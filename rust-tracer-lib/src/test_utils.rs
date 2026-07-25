@@ -6,7 +6,7 @@
 //!   failure shows up on a correct implementation, increase N, never k > 5.
 //!
 //! The renderer computes in f32, but all test-side statistics accumulate in
-//! f64 (f32 Welford at 10⁶ samples would drown in rounding error). Helper
+//! f64 (f32 Welford at 1e6 samples would drown in rounding error). Helper
 //! parameters are `impl Into<f64>` so call sites can pass either width.
 
 use rand::SeedableRng;
@@ -109,7 +109,8 @@ pub(crate) fn assert_stat_close(
     );
 }
 
-/// MC estimate of ∫_{S²} f(ω) dω = 4π·E_{ω~uniform}[f(ω)]. Returns (estimate, se).
+/// MC estimate of the integral of f over the sphere of directions,
+/// 4*pi*E_uniform[f(w)]. Returns (estimate, se).
 ///
 /// Relies on `UnitVector::random` being uniform, which is itself under test
 /// (vector.rs); run that phase first when interpreting failures.
@@ -165,19 +166,20 @@ pub(crate) fn at_angle(axis: UnitVector, theta: f64) -> UnitVector {
     (theta.cos() as f32 * axis + theta.sin() as f32 * tangent(axis)).normalized()
 }
 
-/// Wilson–Hilferty approximation of the 0.999 chi-squared quantile.
-/// Accurate to <1% for df ≥ 50 (callers add a 1.02 safety factor).
+/// Wilson-Hilferty approximation of the 0.999 chi-squared quantile.
+/// Accurate to <1% for df >= 50 (callers add a 1.02 safety factor).
 pub(crate) fn chi2_crit_999(df: usize) -> f64 {
     let df = df as f64;
     let a = 2f64 / (9f64 * df);
     df * (1f64 - a + 3.0902 * a.sqrt()).powi(3)
 }
 
-/// Chi-squared goodness-of-fit of a direction sampler against a φ-symmetric
-/// target distribution, over an (z = ω·axis, φ) grid in the frame of `axis`.
+/// Chi-squared goodness-of-fit of a direction sampler against a phi-symmetric
+/// target distribution, over a (z = dot(w, axis), phi) grid in the frame of
+/// `axis`.
 ///
 /// `bin_prob(z0, z1)` must return the analytic probability of the z-slice
-/// [z0, z1] under the target distribution; φ-symmetry makes each of the
+/// [z0, z1] under the target distribution; phi-symmetry makes each of the
 /// `n_phi` azimuthal sub-bins carry `bin_prob / n_phi`.
 ///
 /// Also asserts the support: no sample may fall below `z_min` (within f32
@@ -241,8 +243,9 @@ pub(crate) fn chi2_directions(
     assert!(x2 < crit, "chi² = {x2:.1} ≥ {crit:.1} (df {df})");
 }
 
-/// Sampler↔pdf consistency: E_{ω~sampler}[f(ω)] must equal ∫ f(ω)·pdf(ω) dω
-/// for a probe set with power against wrong normalization/exponent/axis.
+/// Sampler/pdf consistency: E_sampler[f(w)] must equal the integral of
+/// f(w)*pdf(w) over directions, for a probe set with power against wrong
+/// normalization/exponent/axis.
 #[track_caller]
 pub(crate) fn assert_sampler_matches_pdf(
     n_sample: usize,

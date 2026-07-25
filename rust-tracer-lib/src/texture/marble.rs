@@ -7,13 +7,14 @@ use super::TextureProperty;
 
 /// Classic Perlin marble: sine stripes along `direction`, phase-perturbed by
 /// 3D OpenSimplex2 fbm noise evaluated at the world-space hit point (a solid
-/// texture — the pattern carves through the object, it is not surface-mapped).
+/// texture: the pattern carves through the object, it is not surface-mapped).
 ///
-///   t = (1 + sin(scale·⟨p, direction̂⟩ + turbulence·fbm(p))) / 2
+///   t = (1 + sin(scale * dot(p, dir) + turbulence * fbm(p))) / 2
 ///   attenuation = lerp(color, vein_color, t)
 ///
-/// `sin` folds any noise amplitude into t ∈ [0, 1], so the attenuation always
-/// stays inside the hull of the two colors no matter how the noise is tuned.
+/// with dir = normalize(direction). `sin` folds any noise amplitude into
+/// t in [0, 1], so the attenuation always stays inside the hull of the two
+/// colors no matter how the noise is tuned.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Marble {
@@ -22,13 +23,13 @@ pub struct Marble {
     pub emission: Color,
     /// Stripe axis; only its direction matters (normalized before use).
     pub direction: Vector,
-    /// Stripe angular frequency in rad/world-unit (wavelength = 2π/scale).
-    /// The noise feature size follows the stripe wavelength.
+    /// Stripe angular frequency in rad/world-unit (wavelength =
+    /// 2*pi/scale). The noise feature size follows the stripe wavelength.
     pub scale: f32,
-    /// Phase distortion strength in radians. The fbm term peaks around ±0.8
-    /// (see `noise_range_probe`), so the default 4 lets veins wander by up to
-    /// ~half a stripe (≈π radians of phase); 0 gives perfectly straight
-    /// stripes, and large values scramble them into blobs.
+    /// Phase distortion strength in radians. The fbm term peaks around
+    /// +/-0.8 (see `noise_range_probe`), so the default 4 lets veins wander
+    /// by up to ~half a stripe (~pi radians of phase); 0 gives perfectly
+    /// straight stripes, and large values scramble them into blobs.
     pub turbulence: f32,
     pub octaves: usize,
     pub seed: i64,
@@ -54,7 +55,7 @@ impl Marble {
     ///
     /// fastnoise-lite is f32-native and normalizes its fbm by the fractal
     /// bounding factor, so the output is zero-mean and documented to stay
-    /// within [-1, 1] (empirically ±0.9; see `noise_range_probe`). The
+    /// within [-1, 1] (empirically +/-0.9; see `noise_range_probe`). The
     /// `FastNoiseLite` value holds only scalar config, so constructing one per
     /// call is cheap. Its default lacunarity 2.0 / gain 0.5 match our octave
     /// schedule and are left implicit.
@@ -107,7 +108,7 @@ mod test {
     }
 
     /// With turbulence 0 the texture is a pure sine stripe pattern with the
-    /// closed form t = (1 + sin(scale·⟨p, d̂⟩))/2 — checked in f64.
+    /// closed form t = (1 + sin(scale * dot(p, dir)))/2, checked in f64.
     #[test]
     fn turbulence_zero_gives_exact_stripes() {
         let (color, vein_color) = colors();
@@ -140,8 +141,8 @@ mod test {
 
     /// Pins the fbm range the `turbulence` doc relies on. fastnoise-lite
     /// documents its fbm output as bounded within [-1, 1] and normalizes by
-    /// the fractal-bounding factor — measured here at ±0.99 (1 octave) and
-    /// ±0.83 (4 octaves). Asserting the documented ±1 bound trips if a crate
+    /// the fractal-bounding factor; measured here at +/-0.99 (1 octave) and
+    /// +/-0.83 (4 octaves). Asserting the documented bound trips if a crate
     /// update changes its normalization.
     #[test]
     fn noise_range_probe() {
@@ -161,7 +162,7 @@ mod test {
                 max = max.max(v);
                 mean += f64::from(v) / f64::from(n);
             }
-            // documented bound is ±1; the small slack absorbs f32 rounding
+            // documented bound is +/-1; the small slack absorbs f32 rounding
             assert!(
                 (-1.01..0f32).contains(&min) && (0f32..1.01).contains(&max),
                 "fbm({octaves} octaves) range [{min}, {max}] escapes ±1 or is one-sided",
@@ -171,7 +172,7 @@ mod test {
         }
     }
 
-    /// t ∈ [0, 1] means every channel stays inside the hull of the two
+    /// t in [0, 1] means every channel stays inside the hull of the two
     /// colors, whatever the noise does.
     #[test]
     fn attenuation_stays_in_color_hull() {

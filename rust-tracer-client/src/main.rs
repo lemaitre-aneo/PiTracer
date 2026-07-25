@@ -7,19 +7,19 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Debug, Clone, Default, Parser)]
 pub struct Cli {
-    /// Endpoint
+    /// ArmoniK control-plane gRPC endpoint
     #[arg(short, long)]
     pub endpoint: String,
 
-    /// #channels
+    /// Number of gRPC channels to open
     #[arg(short, long, default_value = "1")]
     pub channels: usize,
 
-    /// #streams
+    /// Number of concurrent request streams per channel
     #[arg(short, long, default_value = "1")]
     pub streams: usize,
 
-    /// Wait in sec
+    /// Seconds to wait before exiting
     #[arg(short, long, default_value = "0")]
     pub wait: f64,
 }

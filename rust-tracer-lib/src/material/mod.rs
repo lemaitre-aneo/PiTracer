@@ -12,7 +12,21 @@ pub use lambertian::*;
 pub use metal::*;
 
 pub trait Material<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
+    /// Samples the outgoing direction of a ray scattering at `hit`; `None`
+    /// means the ray is absorbed.
     fn scatter(&self, direction: UnitVector, hit: Hit, rng: &mut R) -> Option<UnitVector>;
+
+    /// Solid-angle density of `scatter`, with two contracts attached:
+    ///
+    /// - `0` (the default) marks a delta/specular BSDF, which both light
+    ///   sampling estimators exclude entirely (mixing a delta lobe into pdf
+    ///   ratios is ill-defined);
+    /// - for pdf > 0 materials the renderer assumes
+    ///   f * cos(theta) = attenuation * pdf (true for the cosine-sampled
+    ///   Lambertian). NEE's direct term and the mixture reweighting both
+    ///   lean on it, so any new non-specular material must keep this
+    ///   proportionality or those estimators become biased (the scene-level
+    ///   statistical tests do catch violations).
     fn pdf(&self, direction: UnitVector, hit: Hit, scattered: UnitVector) -> f32 {
         _ = (direction, hit, scattered);
         0f32
@@ -75,6 +89,9 @@ mod definition {
         Dielectric(Dielectric),
     }
 
+    /// A missing `material:` tag falls back to Lambertian; so does an unknown
+    /// tag value, silently, via the untagged `Empty`/`Default` arms (the
+    /// BACKLOG P0 typo trap: `material: Metall` renders as Lambertian).
     #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
     #[allow(clippy::enum_variant_names)]
     #[serde(untagged)]

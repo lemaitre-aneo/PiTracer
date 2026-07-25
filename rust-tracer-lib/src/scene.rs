@@ -20,22 +20,22 @@ pub struct SceneDefinition {
     /// Mixture continuation sampling (a distinct estimator, overriding the
     /// NEE `light_sampling` path when `> 0`). Instead of casting a separate
     /// shadow ray, the single continuation direction is drawn from a mixture
-    /// of the light-target and BRDF densities — with this probability the
-    /// bounce is aimed at a light, otherwise it follows the BRDF — so each
+    /// of the light-target and BRDF densities (with this probability the
+    /// bounce is aimed at a light, otherwise it follows the BRDF), so each
     /// diffuse bounce casts exactly one ray. `0.0` disables it and falls back
-    /// to the NEE/path-tracing path. Meaningful range is `[0, 1)`: at `1.0` the
-    /// BRDF term vanishes and directions the lights do not subtend are missed
-    /// (biased). Default `0.25` (mixture is the default estimator).
+    /// to the NEE/path-tracing path. Meaningful range is `[0, 1)`: at `1.0`
+    /// the BRDF term vanishes and directions the lights do not subtend are
+    /// missed (biased). Default `0.25` (mixture is the default estimator).
     pub mixture_sampling: f32,
     /// Geometric decay of the mixture light probability with path depth:
-    /// `c_l(d) = mixture_sampling · mixture_decay^d`. `1.0` keeps it constant at
-    /// every bounce (the naive mixture, whose worst-case throughput grows like
-    /// `(ρ/c_b)^depth` → deep fireflies). A value `< 1` concentrates light
-    /// aiming on the early bounces and relaxes to pure BRDF at depth, which
-    /// keeps the worst-case path throughput a bounded constant (since
-    /// `Σ c_l(d)` converges) — mild, sample-reducible fireflies even at ρ→1.
-    /// Default `0.99`: near the `1.0` performance optimum but strictly `< 1`,
-    /// so the default estimator provably cannot diverge.
+    /// `c_l(d) = mixture_sampling * mixture_decay^d`. `1.0` keeps it constant
+    /// at every bounce (the naive mixture, whose worst-case throughput grows
+    /// like `(rho/c_b)^depth`: deep fireflies). A value `< 1` concentrates
+    /// light aiming on the early bounces and relaxes to pure BRDF at depth,
+    /// which keeps the worst-case path throughput a bounded constant (since
+    /// `sum c_l(d)` converges): mild, sample-reducible fireflies even as
+    /// rho -> 1. Default `0.99`: near the `1.0` performance optimum but
+    /// strictly `< 1`, so the default estimator provably cannot diverge.
     pub mixture_decay: f32,
 }
 
@@ -114,8 +114,8 @@ fn build_textured<G: Geometry + Send + Sync + 'static>(
 }
 
 /// Peels the geometry tag off a definition object so the chain below can
-/// monomorphize the full geometry × texture × material product, and pairs the
-/// result with its light-sampling weight |emission|².
+/// monomorphize the full geometry x texture x material product, and pairs the
+/// result with its light-sampling weight |emission|^2.
 fn build_object(
     object: Object<GeometryEnum, MaterialEnum, TextureEnum>,
 ) -> (Arc<dyn Hittable + Send + Sync>, f32) {
@@ -221,17 +221,18 @@ impl Scene {
 
         // Light transport with next-event estimation: at each diffuse bounce
         // the light is sampled explicitly (direct term), while the path keeps
-        // following pure BRDF samples with unweighted throughput. Emitters can
-        // therefore be found by two strategies, so each pickup is weighted by
-        // the balance heuristic: p_used / (p_material + p_light) — direct
-        // samples via p_light, continuation hits via p_material (carried in
-        // `emission_weight`). All weights are ≤ 1: unlike a throughput-
-        // reweighting mixture (whose off-light weight is 2 per bounce, i.e.
-        // 2^k fireflies on deep paths), no path can exceed the physical bound.
+        // following pure BRDF samples with unweighted throughput. Emitters
+        // can therefore be found by two strategies, so each pickup is
+        // weighted by the balance heuristic p_used / (p_material + p_light):
+        // direct samples via p_light, continuation hits via p_material
+        // (carried in `emission_weight`). All weights are <= 1: unlike a
+        // throughput-reweighting mixture (whose off-light weight is 2 per
+        // bounce, i.e. 2^k fireflies on deep paths), no path can exceed the
+        // physical bound.
         let mut emission_weight = 1f32;
-        // Running mixture light-probability c_l = mixture_sampling·decay^depth,
-        // advanced by one multiply per bounce (below) rather than a powi per
-        // intersection.
+        // Running mixture light probability
+        // c_l = mixture_sampling * decay^depth, advanced by one multiply per
+        // bounce (below) rather than a powi per intersection.
         let mut mixture_prob = self.mixture_sampling;
 
         while let Some((best, hittable, closest)) = self.closest_hit(origin, direction, rng) {
@@ -265,20 +266,23 @@ impl Scene {
 
             if self.mixture_sampling > 0f32 && diffuse {
                 // Mixture continuation sampling: NO separate shadow ray. The
-                // single continuation direction is drawn from a mixture of the
-                // light-target and BRDF densities, p_mix = c_l·pl + c_b·pm, and
-                // the bounce throughput is f·cosθ/p_mix. Emission is then picked
-                // up by ordinary path tracing (full weight) — one ray per
-                // bounce, steered at a light with probability c_l. Unbiased for
-                // c_b > 0 (the BRDF term keeps p_mix covering the whole lobe).
+                // single continuation direction is drawn from a mixture of
+                // the light-target and BRDF densities,
+                // p_mix = c_l*pl + c_b*pm, and the bounce throughput is
+                // f*cos/p_mix. Emission is then picked up by ordinary path
+                // tracing (full weight): one ray per bounce, steered at a
+                // light with probability c_l. Unbiased for c_b > 0 (the BRDF
+                // term keeps p_mix covering the whole lobe).
                 //
-                // c_l decays geometrically with depth (see `mixture_prob`). The
-                // per-bounce throughput is bounded by ρ/c_b, so the worst-case
-                // path throughput is ∏ ρ/c_b,d; a summable c_l schedule keeps
-                // ∏ 1/(1-c_l,d) finite even at ρ=1 and unbounded depth, so the
-                // firefly magnitude is a bounded constant instead of (ρ/c_b)ᵈ.
-                // Strong aiming lands on the first bounce (where it matters and
-                // cannot compound); depth relaxes to pure BRDF.
+                // c_l decays geometrically with depth (see `mixture_prob`).
+                // The per-bounce throughput is bounded by rho/c_b, so the
+                // worst-case path throughput is the product of rho/c_b(d)
+                // over the bounces; a summable c_l schedule keeps
+                // prod 1/(1 - c_l(d)) finite even at rho = 1 and unbounded
+                // depth, so the firefly magnitude is a bounded constant
+                // instead of (rho/c_b)^depth. Strong aiming lands on the
+                // first bounce (where it matters and cannot compound); depth
+                // relaxes to pure BRDF.
                 let c_l = mixture_prob.min(1f32);
                 let c_b = 1f32 - c_l;
 
@@ -305,14 +309,15 @@ impl Scene {
                 let p_mix = c_l * pl + c_b * pm;
 
                 // Below the horizon (pm == 0) or unsupported: zero throughput,
-                // so the path contributes nothing further — terminate here.
+                // so the path contributes nothing further; terminate here.
                 if pm <= 0f32 || p_mix <= 0f32 {
                     colors.push(color);
                     break;
                 }
 
-                // `attenuation` already carries ρ and f·cosθ = ρ·pm, so scaling
-                // it by pm/p_mix gives the bounce throughput ρ·pm/p_mix.
+                // `attenuation` already carries rho and f*cos = rho*pm, so
+                // scaling it by pm/p_mix gives the bounce throughput
+                // rho*pm/p_mix.
                 color.attenuation *= pm / p_mix;
                 emission_weight = 1f32;
                 next_direction = cont_dir;
@@ -332,8 +337,9 @@ impl Scene {
 
                 if let Some((geometry, _, _)) = candidate {
                     let light_direction = geometry.target_random(hit.point, rng);
-                    // For cosine-sampled Lambertian, f·cosθ = albedo·pdf, so
-                    // the balance-weighted direct term is ρ·pm/(pl + pm)·L_e.
+                    // For cosine-sampled Lambertian, f*cos = albedo*pdf, so
+                    // the balance-weighted direct term is
+                    // rho * pm/(pl + pm) * L_e.
                     let pm = material.pdf(direction, hit, light_direction);
                     let pl = self.light_pdf(hit.point, light_direction);
                     let shadow_origin = hit.spawn(light_direction);
@@ -360,7 +366,7 @@ impl Scene {
                     material_pdf / (material_pdf + self.light_pdf(hit.point, scattered));
             } else {
                 // No light sampling at this bounce (specular or no lights):
-                // the continuation ray is the only strategy — full pickup.
+                // the continuation ray is the only strategy; full pickup.
                 emission_weight = 1f32;
             }
 
@@ -407,13 +413,15 @@ impl Scene {
 
 // Estimator-level ground truths (derived in the test plan, not from the code):
 //
-// - Furnace: a closed Lambertian enclosure with albedo ρ and emission E has
-//   L∞ = E/(1−ρ); truncated to m bounce terms, Sₘ = E(1−ρᵐ)/(1−ρ). Cosine
-//   BRDF sampling makes the per-bounce weight exactly ρ, so every path yields
-//   the identical truncated sum: zero variance with light_sampling off.
-// - Direct light: a Lambertian surface (albedo ρ) lit by a spherical light
+// - Furnace: a closed Lambertian enclosure with albedo rho and emission E has
+//   L_inf = E/(1 - rho); truncated to m bounce terms,
+//   S_m = E*(1 - rho^m)/(1 - rho). Cosine BRDF sampling makes the per-bounce
+//   weight exactly rho, so every path yields the identical truncated sum:
+//   zero variance with light_sampling off.
+// - Direct light: a Lambertian surface (albedo rho) lit by a spherical light
 //   (radiance E, radius r, distance d) exactly along the normal:
-//   L = ∫cone (ρ/π)·E·cosθ dω = ρ·E·sin²θ_max = ρ·E·r²/d².
+//   L = integral over the cone of (rho/pi)*E*cos dw
+//     = rho*E*sin^2(theta_max) = rho*E*r^2/d^2.
 // - Any correct light-sampling estimator only changes variance, never the
 //   expectation: ON and OFF must converge to the same values.
 #[cfg(test)]
@@ -523,7 +531,7 @@ mod test {
         stats
     }
 
-    /// Camera enclosed in a uniformly emissive sphere: albedo ρ, emission E.
+    /// Camera enclosed in a uniformly emissive sphere: albedo rho, emission E.
     fn furnace(albedo: f32, emission: f32, depth: u32, light_sampling: bool) -> Scene {
         scene(
             (0f32, 0f32, 0f32),
@@ -540,17 +548,18 @@ mod test {
     }
 
     /// [S_depth, S_depth+2]: brackets the truncated furnace series without
-    /// pinning an exact depth-counting convention (±1 bounce tolerated).
+    /// pinning an exact depth-counting convention (+/-1 bounce tolerated).
     fn furnace_bracket(albedo: f64, emission: f64, depth: u32) -> (f64, f64) {
         let series = |m: u32| emission * (1f64 - albedo.powi(m as i32)) / (1f64 - albedo);
         (series(depth), series(depth + 2))
     }
 
-    /// Lambertian floor (ρ = 0.75) whose surface point P = (0,0,0) has normal
-    /// +Y, lit by a spherical light (E = 5, r = 0.2) at distance d = 1 exactly
-    /// along the normal; the camera center ray hits the floor exactly at P
-    /// (closest approach to the light: 0.707 > 0.2). Expected radiance:
-    /// L = ρ·E·r²/d² = 0.75·5·0.04 = 0.15 per channel, exact for depth ≥ 2.
+    /// Lambertian floor (rho = 0.75) whose surface point P = (0,0,0) has
+    /// normal +Y, lit by a spherical light (E = 5, r = 0.2) at distance d = 1
+    /// exactly along the normal; the camera center ray hits the floor exactly
+    /// at P (closest approach to the light: 0.707 > 0.2). Expected radiance:
+    /// L = rho*E*r^2/d^2 = 0.75 * 5 * 0.04 = 0.15 per channel, exact for
+    /// depth >= 2.
     fn direct_light_scene(light_sampling: bool) -> Scene {
         scene(
             (1.2f32, 1.2f32, 0f32),
@@ -574,7 +583,7 @@ mod test {
         )
     }
 
-    /// Same floor and camera as `direct_light_scene`, but lit by a 1×1
+    /// Same floor and camera as `direct_light_scene`, but lit by a 1x1
     /// horizontal quad (E = 5) centered at height 1 above P = (0,0,0). OFF
     /// uses the quad only as passive geometry (BRDF rays must find it); ON
     /// additionally routes NEE through target_random/target_pdf.
@@ -631,7 +640,7 @@ mod test {
     }
 
     /// Estimator equality for the disk light: ON and OFF must converge to
-    /// the same mean — the load-bearing bias detector for the ellipse's
+    /// the same mean. The load-bearing bias detector for the ellipse's
     /// target_random/target_pdf pair inside the full NEE+MIS estimator.
     #[test]
     fn ellipse_light_sampling_invariance() {
@@ -746,7 +755,7 @@ mod test {
     }
 
     /// Purely emissive enclosure: every path terminates on the first hit with
-    /// exactly E — with and without light sampling.
+    /// exactly E, with and without light sampling.
     #[test]
     fn emissive_enclosure_exact() {
         for light_sampling in [false, true] {
@@ -783,8 +792,8 @@ mod test {
     }
 
     /// A closed box of purely emissive quads around the camera: every path
-    /// terminates on its first hit with exactly E — pins the full loop
-    /// (camera → quad hit → to_hit → emission pickup) with zero MC noise,
+    /// terminates on its first hit with exactly E. Pins the full loop
+    /// (camera -> quad hit -> to_hit -> emission pickup) with zero MC noise,
     /// with and without light sampling.
     #[test]
     fn emissive_quad_box_exact() {
@@ -871,7 +880,7 @@ mod test {
 
     /// With cosine BRDF sampling the Lambertian per-bounce weight is exactly
     /// the albedo, so every furnace path yields the identical truncated
-    /// series: zero variance, value within the ±1-bounce bracket.
+    /// series: zero variance, value within the +/-1-bounce bracket.
     #[test]
     fn white_furnace_off_deterministic() {
         let scene = furnace(0.5f32, 0.5f32, 10, false);
@@ -892,12 +901,12 @@ mod test {
     }
 
     /// PRIMARY BIAS DETECTOR. A correct one-sample mixture estimator
-    /// p_mix = ½·p_brdf + ½·Σwᵢ·p_light has per-bounce expected weight
-    /// E[(cosθ/π)/p_mix] = 1 under p_mix, so the mean must match the OFF
-    /// value. Light samples falling below the horizon contribute 0 and must
-    /// NOT be rejected-and-retried (that renormalizes the mixture and biases
-    /// it) — this furnace exercises the inside-light branch where half the
-    /// light samples fall below the horizon.
+    /// p_mix = (p_brdf + sum_i w_i * p_light_i) / 2 has per-bounce expected
+    /// weight E[(cos/pi)/p_mix] = 1 under p_mix, so the mean must match the
+    /// OFF value. Light samples falling below the horizon contribute 0 and
+    /// must NOT be rejected-and-retried (that renormalizes the mixture and
+    /// biases it); this furnace exercises the inside-light branch where half
+    /// the light samples fall below the horizon.
     #[test]
     fn white_furnace_on_unbiased() {
         let scene = furnace(0.5f32, 0.5f32, 10, true);
@@ -912,8 +921,8 @@ mod test {
         }
     }
 
-    /// Closed-form anchor, BRDF sampling only: L = ρ·E·r²/d² = 0.15.
-    /// Per-sample value is ρE·Bernoulli(sin²θ_max): σ ≈ 0.735.
+    /// Closed-form anchor, BRDF sampling only: L = rho*E*r^2/d^2 = 0.15.
+    /// Per-sample value is rho*E*Bernoulli(sin^2(theta_max)): sigma ~ 0.735.
     #[test]
     fn direct_light_analytic_anchor_off() {
         let scene = direct_light_scene(false);
@@ -985,7 +994,7 @@ mod test {
     }
 
     /// The original complaint: on a small bright light (4% BRDF hit rate),
-    /// light sampling must REDUCE variance — conservatively by 2×; a correct
+    /// light sampling must REDUCE variance, conservatively by 2x; a correct
     /// mixture gains about an order of magnitude here.
     #[test]
     fn light_sampling_reduces_variance() {
@@ -1042,7 +1051,7 @@ mod test {
             )
         };
         // mirror path: metal at z = -1, reflected straight back into the dome:
-        // L = 0.9·E exactly
+        // L = 0.9*E exactly
         let expected = [0.9f32, 1.8f32, 2.7f32];
         for light_sampling in [false, true] {
             let stats = sample_center(&build(light_sampling), 100, seeds()[0]);
@@ -1058,7 +1067,7 @@ mod test {
     }
 
     /// Unit-albedo furnace: every collected term adds E exactly, so the value
-    /// counts the bounce budget: E ≤ L ≤ (depth+2)·E, strictly increasing
+    /// counts the bounce budget: E <= L <= (depth+2)*E, strictly increasing
     /// with depth.
     #[test]
     fn recursion_depth_bounds_energy() {
@@ -1085,7 +1094,7 @@ mod test {
             );
         }
 
-        // ρ = 0.5: the truncation depth actually varies the value
+        // rho = 0.5: the truncation depth actually varies the value
         for depth in [5u32, 10] {
             let (lo, hi) = furnace_bracket(0.5f64, 0.5f64, depth);
             let stats = sample_center(&furnace(0.5f32, 0.5f32, depth, false), 100, seeds()[2]);
@@ -1098,11 +1107,11 @@ mod test {
     }
 
     /// Fireflies (speck noise): with next-event estimation every collected
-    /// term is at most (1 + ρ)·E_max ≤ 2·E_max and there are at most depth+1
-    /// of them, so no path sample can exceed 2·E_max·(depth+1) — a
+    /// term is at most (1 + rho)*E_max <= 2*E_max and there are at most
+    /// depth+1 of them, so no path sample can exceed 2*E_max*(depth+1), a
     /// deterministic bound, not a statistical one. A throughput-reweighting
     /// mixture estimator violates it exponentially: its off-light weight is
-    /// 2 per bounce, so deep paths carry ~(2ρ)^k and show up as saturated
+    /// 2 per bounce, so deep paths carry ~(2*rho)^k and show up as saturated
     /// specks on bright-albedo scenes.
     #[test]
     fn light_sampling_no_fireflies() {
@@ -1145,7 +1154,7 @@ mod test {
         );
     }
 
-    /// Firefly bound with a quad light: same 2·E_max·(depth+1) invariant
+    /// Firefly bound with a quad light: same 2*E_max*(depth+1) invariant
     /// through the quad pdf, including shading points nearly coplanar with
     /// the light (where target_pdf is 0 and the direct term must just skip).
     #[test]
@@ -1190,17 +1199,19 @@ mod test {
         );
     }
 
-    /// Mixture sampling has no 2·E_max·(depth+1) guarantee — its firefly bound
-    /// is the throughput product ∏ ρ/(1−c_l(d)), c_l(d) = mixture_sampling·decayᵈ.
-    /// A decay < 1 makes Σ c_l(d) converge, so that product (hence the max
-    /// sample) stays a bounded constant even on a deep near-white enclosure,
-    /// where a constant c_l (decay = 1) would grow like (ρ/c_b)^depth. Both the
-    /// default (0.25/0.99) and an aggressive schedule are checked; the analytic
-    /// per-channel bound Σₖ E_max·Pₖ (Pₖ = ∏_{j<k} ρ/(1−c_l(j))) is a hard,
-    /// deterministic ceiling, not a statistical one. The aggressive (0.5, 0.5)
-    /// case is the load-bearing one: its bound is O(10³) while a decay that
-    /// silently stayed at 1 would carry ~2³⁰ ≈ 10⁹, so the test fails loudly if
-    /// the decay schedule is ever dropped.
+    /// Mixture sampling has no 2*E_max*(depth+1) guarantee; its firefly bound
+    /// is the throughput product prod_d rho/(1 - c_l(d)) with
+    /// c_l(d) = mixture_sampling * decay^d. A decay < 1 makes sum c_l(d)
+    /// converge, so that product (hence the max sample) stays a bounded
+    /// constant even on a deep near-white enclosure, where a constant c_l
+    /// (decay = 1) would grow like (rho/c_b)^depth. Both the default
+    /// (0.25/0.99) and an aggressive schedule are checked; the analytic
+    /// per-channel bound sum_k E_max*P_k (P_k = prod_{j<k} rho/(1 - c_l(j)))
+    /// is a hard, deterministic ceiling, not a statistical one. The
+    /// aggressive (0.5, 0.5) case is the load-bearing one: its bound is
+    /// O(1e3) while a decay that silently stayed at 1 would carry
+    /// ~2^30 = 1e9, so the test fails loudly if the decay schedule is ever
+    /// dropped.
     #[test]
     fn mixture_no_fireflies() {
         let depth = 30u32;
@@ -1235,8 +1246,9 @@ mod test {
         };
 
         for (ms, decay) in [(0.25f32, 0.99f32), (0.5f32, 0.5f32)] {
-            // Analytic ceiling: Σₖ E_max·Pₖ with the per-bounce throughput
-            // capped at ρ/(1−c_l), c_l = ms·decayᵏ (≤ ms < 1, so never 1/0).
+            // Analytic ceiling: sum_k E_max*P_k with the per-bounce
+            // throughput capped at rho/(1 - c_l), c_l = ms*decay^k
+            // (<= ms < 1, so never 1/0).
             let mut bound = 0f64;
             let mut throughput = 1f64;
             for k in 0..=depth {
@@ -1265,9 +1277,9 @@ mod test {
         }
     }
 
-    /// Mixture sampling — the default estimator — is unbiased: same mean as NEE
-    /// on the direct-light scene (analytic 0.15). Guards the correctness of what
-    /// ships by default, the way `light_sampling_invariance` guards NEE.
+    /// Mixture sampling (the default estimator) is unbiased: same mean as NEE
+    /// on the direct-light scene (analytic 0.15). Guards the correctness of
+    /// what ships by default, the way `light_sampling_invariance` guards NEE.
     #[test]
     fn mixture_light_sampling_invariance() {
         let nee = sample_center(&direct_light_scene(true), 1_000_000, seeds()[0]);
@@ -1287,13 +1299,13 @@ mod test {
         }
     }
 
-    /// Heavy tier: tighter convergence bounds (β ≈ 1% on the anchor).
+    /// Heavy tier: tighter convergence bounds (~1% relative on the anchor).
     ///
     /// `extra` absorbs the deterministic receiver displacement of ray
-    /// spawning: bounce origins sit SURFACE_OFFSET_REL·(r+|C|) = 2e-4 off the
-    /// floor, toward the light at distance ~1, biasing its solid angle by
-    /// ≤ 2·2e-4 ≈ +6e-5 on the 0.15 anchor — resolvable at 1e7 samples
-    /// (1.5σ) though invisible in the fast tier.
+    /// spawning: bounce origins sit SURFACE_OFFSET_REL*(r + |C|) = 2e-4 off
+    /// the floor, toward the light at distance ~1, biasing its solid angle by
+    /// up to 2*2e-4 = +6e-5 on the 0.15 anchor. Resolvable at 1e7 samples
+    /// (1.5 sigma) though invisible in the fast tier.
     #[test]
     #[ignore = "heavy convergence tier"]
     fn heavy_direct_light_convergence() {

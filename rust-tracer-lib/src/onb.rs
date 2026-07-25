@@ -1,5 +1,8 @@
 use crate::{UnitVector, Vector, select};
 
+/// Orthonormal basis around `w`: `transform` maps local coordinates (z along
+/// `w`) to world space. Handedness is unspecified; every distribution sampled
+/// through this basis is phi-symmetric, so it never matters.
 pub struct Onb {
     u: UnitVector,
     v: UnitVector,
@@ -26,7 +29,7 @@ mod test {
 
     /// The basis must be orthonormal, map local +z to w, and be a rotation up
     /// to handedness (|det| = 1). Handedness itself is not part of the spec:
-    /// every distribution sampled through Onb is φ-symmetric.
+    /// every distribution sampled through Onb is phi-symmetric.
     fn check_orthonormal(w: UnitVector) {
         let onb = Onb::new(w);
 

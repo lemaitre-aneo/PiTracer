@@ -12,7 +12,7 @@ pub use quad::*;
 pub use sphere::*;
 
 /// The geometry side of a scene-definition object, discriminated by an
-/// explicit `type:` field (`type: sphere`, `type: quad`) in the same
+/// explicit `type:` field (`type: sphere` / `quad` / `ellipse`) in the same
 /// flattened YAML map that carries the material tag and texture keys.
 ///
 /// Unlike `MaterialEnum` (where a missing `material:` deliberately falls back
@@ -30,7 +30,7 @@ pub enum GeometryEnum {
     Ellipse(Ellipse),
 }
 
-/// Only for `Object`'s container-level `#[serde(default)]` bound — the YAML
+/// Only for `Object`'s container-level `#[serde(default)]` bound; the YAML
 /// path always goes through the tag and can never produce this.
 impl Default for GeometryEnum {
     fn default() -> Self {
@@ -90,6 +90,8 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for GeometryEnum {
     }
 }
 
+/// Leaf geometry: `hit` returns a bare distance. The blanket impls below lift
+/// any primitive to [`Geometry`] and [`HitCaster`] (a leaf is its own caster).
 pub(crate) trait GeometryPrimitive<R: crate::Rng + ?Sized = dyn RngCore>:
     std::fmt::Debug
 {
@@ -107,6 +109,11 @@ pub(crate) trait GeometryPrimitive<R: crate::Rng + ?Sized = dyn RngCore>:
     }
 }
 
+/// Object-level geometry. `hit` returns the distance plus the [`HitCaster`]
+/// for what was actually struck; the caller resolves `to_hit`, material, and
+/// texture on the winner only. `target_random`/`target_pdf` are the
+/// solid-angle light-sampling pair; the defaults (constant direction, pdf 0)
+/// suit geometry that is never used as a light target.
 pub trait Geometry<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
     fn hit<'a>(
         &'a self,
@@ -127,6 +134,9 @@ pub trait Geometry<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
     }
 }
 
+/// Surface interaction. `normal` always opposes the incident ray; `front`
+/// records whether the ray came from the side the geometric normal points
+/// toward; `u`/`v` are the geometry's own surface parameters.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Hit {
     pub point: Vector,
@@ -146,14 +156,19 @@ impl Hit {
     /// Origin for a secondary ray leaving this hit: `point` pushed `offset`
     /// off the surface toward the side `direction` travels (outside for
     /// reflection/diffuse, inside for transmission). An origin strictly off a
-    /// convex surface cannot re-intersect it on its way out — grazing
-    /// included — which is what makes the tiny relative hit guard
+    /// convex surface cannot re-intersect it on its way out, grazing
+    /// included, which is what makes the tiny relative hit guard
     /// ([`crate::HIT_EPSILON_REL`]) sufficient.
     pub fn spawn(&self, direction: UnitVector) -> Vector {
         self.point + self.offset.copysign(direction.dot(self.normal)) * self.normal
     }
 }
 
+/// Handle to the sub-geometry a `hit` actually struck. Every leaf returns
+/// itself, and the `as_material`/`as_texture` defaults hand back the owning
+/// object's components; composite geometry whose material varies across its
+/// surface (per-face meshes, CSG, a BVH returning a child leaf) overrides
+/// them so the winner supplies its own.
 pub trait HitCaster<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
     fn as_geometry(&self) -> &dyn Geometry<R>;
     fn as_material<'a>(&'a self, default: &'a dyn Material<R>) -> &'a dyn Material<R> {
