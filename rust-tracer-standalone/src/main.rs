@@ -47,6 +47,20 @@ pub struct Cli {
     /// Light Sampling [default: true]
     #[arg(long)]
     pub light_sampling: Option<bool>,
+
+    /// Mixture continuation sampling (overrides NEE when > 0): draw the single
+    /// continuation direction from the light/BRDF mixture, aiming at a light
+    /// with this probability, one ray per bounce. 0 disables. Meaningful in
+    /// [0,1). Negative = use the scene file's value.
+    #[arg(long, default_value = "-1")]
+    pub mixture_sampling: f32,
+
+    /// Geometric decay of the mixture light probability per bounce
+    /// (c_l = mixture_sampling · decay^depth). 1.0 = constant (deep fireflies);
+    /// < 1 concentrates aiming on early bounces and bounds throughput.
+    /// Negative = use the scene file's value.
+    #[arg(long, default_value = "-1")]
+    pub mixture_decay: f32,
 }
 
 fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
@@ -83,6 +97,16 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
         scene.light_sampling = ls;
     } else {
         cli.light_sampling = Some(scene.light_sampling);
+    }
+    if cli.mixture_sampling < 0f32 {
+        cli.mixture_sampling = scene.mixture_sampling;
+    } else {
+        scene.mixture_sampling = cli.mixture_sampling;
+    }
+    if cli.mixture_decay < 0f32 {
+        cli.mixture_decay = scene.mixture_decay;
+    } else {
+        scene.mixture_decay = cli.mixture_decay;
     }
     let scene = Scene::from(scene);
     tracing::debug!("{scene:?}");
@@ -278,6 +302,10 @@ mod test {
             .try_deserialize::<::raytracer::SceneDefinition>()
             .unwrap();
         definition.light_sampling = light_sampling;
+        // This helper feeds the NEE/PT firefly-bound test, whose 2·E·(depth+1)
+        // bound is the NEE invariant; disable the (now-default) mixture
+        // estimator so the test stays about NEE/PT.
+        definition.mixture_sampling = 0.0;
         ::raytracer::Scene::from(definition)
     }
 

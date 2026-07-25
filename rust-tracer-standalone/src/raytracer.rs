@@ -204,6 +204,8 @@ mod test {
             samples: 4,
             gamma: 2.2,
             light_sampling: false,
+            mixture_sampling: 0.0,
+            mixture_decay: 1.0,
         })
     }
 

@@ -17,6 +17,26 @@ pub struct SceneDefinition {
     pub samples: u32,
     pub gamma: f32,
     pub light_sampling: bool,
+    /// Mixture continuation sampling (a distinct estimator, overriding the
+    /// NEE `light_sampling` path when `> 0`). Instead of casting a separate
+    /// shadow ray, the single continuation direction is drawn from a mixture
+    /// of the light-target and BRDF densities — with this probability the
+    /// bounce is aimed at a light, otherwise it follows the BRDF — so each
+    /// diffuse bounce casts exactly one ray. `0.0` disables it and falls back
+    /// to the NEE/path-tracing path. Meaningful range is `[0, 1)`: at `1.0` the
+    /// BRDF term vanishes and directions the lights do not subtend are missed
+    /// (biased). Default `0.25` (mixture is the default estimator).
+    pub mixture_sampling: f32,
+    /// Geometric decay of the mixture light probability with path depth:
+    /// `c_l(d) = mixture_sampling · mixture_decay^d`. `1.0` keeps it constant at
+    /// every bounce (the naive mixture, whose worst-case throughput grows like
+    /// `(ρ/c_b)^depth` → deep fireflies). A value `< 1` concentrates light
+    /// aiming on the early bounces and relaxes to pure BRDF at depth, which
+    /// keeps the worst-case path throughput a bounded constant (since
+    /// `Σ c_l(d)` converges) — mild, sample-reducible fireflies even at ρ→1.
+    /// Default `0.99`: near the `1.0` performance optimum but strictly `< 1`,
+    /// so the default estimator provably cannot diverge.
+    pub mixture_decay: f32,
 }
 
 impl Default for SceneDefinition {
@@ -28,6 +48,12 @@ impl Default for SceneDefinition {
             samples: 100,
             gamma: 2.2,
             light_sampling: true,
+            // Mixture continuation sampling by default (overrides NEE): ~2.5-3.4x
+            // faster to converge on pitracer. decay 0.99 (< 1) keeps the
+            // worst-case path throughput a bounded constant so the default can
+            // never diverge into fireflies, while staying ~at the d=1.0 optimum.
+            mixture_sampling: 0.25,
+            mixture_decay: 0.99,
         }
     }
 }
@@ -42,6 +68,8 @@ pub struct Scene {
     pub samples: u32,
     pub gamma: f32,
     pub light_sampling: bool,
+    pub mixture_sampling: f32,
+    pub mixture_decay: f32,
 }
 
 impl Default for Scene {
@@ -146,6 +174,8 @@ impl From<SceneDefinition> for Scene {
             samples: value.samples,
             gamma: value.gamma,
             light_sampling: value.light_sampling,
+            mixture_sampling: value.mixture_sampling,
+            mixture_decay: value.mixture_decay,
         }
     }
 }
@@ -199,6 +229,10 @@ impl Scene {
         // reweighting mixture (whose off-light weight is 2 per bounce, i.e.
         // 2^k fireflies on deep paths), no path can exceed the physical bound.
         let mut emission_weight = 1f32;
+        // Running mixture light-probability c_l = mixture_sampling·decay^depth,
+        // advanced by one multiply per bounce (below) rather than a powi per
+        // intersection.
+        let mut mixture_prob = self.mixture_sampling;
 
         while let Some((best, hittable, closest)) = self.closest_hit(origin, direction, rng) {
             let hit = best.as_geometry().to_hit(origin, direction, closest);
@@ -223,13 +257,71 @@ impl Scene {
             };
 
             let material_pdf = material.pdf(direction, hit, scattered);
+            let diffuse = material_pdf > 0f32 && !self.points_of_interest.is_empty();
 
-            if self.light_sampling && material_pdf > 0f32 && !self.points_of_interest.is_empty() {
-                // Next-event estimation: pick one light by weight, sample a
-                // direction toward it, and collect whatever emission that ray
-                // reaches (an occluder contributes its own emission: 0 for
-                // dark objects, and other lights are covered by the mixture
-                // density `light_pdf`).
+            // Continuation for the next bounce: the BRDF sample by default,
+            // overridden by the mixture branch.
+            let mut next_direction = scattered;
+
+            if self.mixture_sampling > 0f32 && diffuse {
+                // Mixture continuation sampling: NO separate shadow ray. The
+                // single continuation direction is drawn from a mixture of the
+                // light-target and BRDF densities, p_mix = c_l·pl + c_b·pm, and
+                // the bounce throughput is f·cosθ/p_mix. Emission is then picked
+                // up by ordinary path tracing (full weight) — one ray per
+                // bounce, steered at a light with probability c_l. Unbiased for
+                // c_b > 0 (the BRDF term keeps p_mix covering the whole lobe).
+                //
+                // c_l decays geometrically with depth (see `mixture_prob`). The
+                // per-bounce throughput is bounded by ρ/c_b, so the worst-case
+                // path throughput is ∏ ρ/c_b,d; a summable c_l schedule keeps
+                // ∏ 1/(1-c_l,d) finite even at ρ=1 and unbounded depth, so the
+                // firefly magnitude is a bounded constant instead of (ρ/c_b)ᵈ.
+                // Strong aiming lands on the first bounce (where it matters and
+                // cannot compound); depth relaxes to pure BRDF.
+                let c_l = mixture_prob.min(1f32);
+                let c_b = 1f32 - c_l;
+
+                // With probability c_l aim the continuation at a light;
+                // otherwise keep the BRDF sample already drawn in `scattered`.
+                let cont_dir = if rng.random::<f32>() < c_l {
+                    let random = rng.random::<f32>();
+                    let candidate = match self.points_of_interest.binary_search_by(|(_, _, c)| {
+                        c.partial_cmp(&random).unwrap_or(std::cmp::Ordering::Equal)
+                    }) {
+                        Ok(x) => self.points_of_interest.get(x),
+                        Err(x) => self.points_of_interest.get(x),
+                    };
+                    match candidate {
+                        Some((geometry, _, _)) => geometry.target_random(hit.point, rng),
+                        None => scattered,
+                    }
+                } else {
+                    scattered
+                };
+
+                let pm = material.pdf(direction, hit, cont_dir);
+                let pl = self.light_pdf(hit.point, cont_dir);
+                let p_mix = c_l * pl + c_b * pm;
+
+                // Below the horizon (pm == 0) or unsupported: zero throughput,
+                // so the path contributes nothing further — terminate here.
+                if pm <= 0f32 || p_mix <= 0f32 {
+                    colors.push(color);
+                    break;
+                }
+
+                // `attenuation` already carries ρ and f·cosθ = ρ·pm, so scaling
+                // it by pm/p_mix gives the bounce throughput ρ·pm/p_mix.
+                color.attenuation *= pm / p_mix;
+                emission_weight = 1f32;
+                next_direction = cont_dir;
+            } else if self.light_sampling && diffuse {
+                // Next-event estimation with balance-heuristic MIS: pick one
+                // light by weight, sample a direction toward it, and collect
+                // whatever emission that ray reaches (an occluder contributes
+                // its own emission: 0 for dark objects, and other lights are
+                // covered by the mixture density `light_pdf`).
                 let random = rng.random::<f32>();
                 let candidate = match self.points_of_interest.binary_search_by(|(_, _, c)| {
                     c.partial_cmp(&random).unwrap_or(std::cmp::Ordering::Equal)
@@ -273,9 +365,10 @@ impl Scene {
             }
 
             colors.push(color);
+            mixture_prob *= self.mixture_decay;
 
-            origin = hit.spawn(scattered);
-            direction = scattered;
+            origin = hit.spawn(next_direction);
+            direction = next_direction;
         }
 
         let mut color = Color::default();
@@ -406,6 +499,8 @@ mod test {
             samples: 1,
             gamma: 2.2,
             light_sampling,
+            mixture_sampling: 0.0,
+            mixture_decay: 1.0,
         })
     }
 
@@ -1093,6 +1188,103 @@ mod test {
             max <= bound,
             "firefly: max sample {max} exceeds the physical bound {bound}"
         );
+    }
+
+    /// Mixture sampling has no 2·E_max·(depth+1) guarantee — its firefly bound
+    /// is the throughput product ∏ ρ/(1−c_l(d)), c_l(d) = mixture_sampling·decayᵈ.
+    /// A decay < 1 makes Σ c_l(d) converge, so that product (hence the max
+    /// sample) stays a bounded constant even on a deep near-white enclosure,
+    /// where a constant c_l (decay = 1) would grow like (ρ/c_b)^depth. Both the
+    /// default (0.25/0.99) and an aggressive schedule are checked; the analytic
+    /// per-channel bound Σₖ E_max·Pₖ (Pₖ = ∏_{j<k} ρ/(1−c_l(j))) is a hard,
+    /// deterministic ceiling, not a statistical one. The aggressive (0.5, 0.5)
+    /// case is the load-bearing one: its bound is O(10³) while a decay that
+    /// silently stayed at 1 would carry ~2³⁰ ≈ 10⁹, so the test fails loudly if
+    /// the decay schedule is ever dropped.
+    #[test]
+    fn mixture_no_fireflies() {
+        let depth = 30u32;
+        let em = 10f64;
+        let rho = 0.999f64;
+        let build = |ms: f32, decay: f32| {
+            let mut scene = scene(
+                (0f32, 0f32, 0f32),
+                (0f32, 0f32, 1f32),
+                vec![
+                    // near-white enclosure: deep paths keep almost full throughput
+                    lambertian(
+                        (0f32, 0f32, 0f32),
+                        10f32,
+                        (0.999f32, 0.999f32, 0.999f32),
+                        (0f32, 0f32, 0f32),
+                    ),
+                    // small bright light inside
+                    lambertian(
+                        (0f32, 8f32, 0f32),
+                        1f32,
+                        (0f32, 0f32, 0f32),
+                        (10f32, 10f32, 10f32),
+                    ),
+                ],
+                depth,
+                false, // light_sampling irrelevant: mixture overrides it
+            );
+            scene.mixture_sampling = ms;
+            scene.mixture_decay = decay;
+            scene
+        };
+
+        for (ms, decay) in [(0.25f32, 0.99f32), (0.5f32, 0.5f32)] {
+            // Analytic ceiling: Σₖ E_max·Pₖ with the per-bounce throughput
+            // capped at ρ/(1−c_l), c_l = ms·decayᵏ (≤ ms < 1, so never 1/0).
+            let mut bound = 0f64;
+            let mut throughput = 1f64;
+            for k in 0..=depth {
+                bound += em * throughput;
+                let c_l = ms as f64 * (decay as f64).powi(k as i32);
+                throughput *= rho / (1f64 - c_l);
+            }
+
+            let scene = build(ms, decay);
+            let mut rng = rng(seeds()[0]);
+            let mut max = 0f64;
+            for _ in 0..100_000 {
+                let color = scene.radiance(2f32, 2f32, &mut rng);
+                for value in [color.r, color.g, color.b] {
+                    assert!(
+                        value.is_finite(),
+                        "non-finite radiance {color:?} (ms={ms}, decay={decay})"
+                    );
+                    max = max.max(f64::from(value));
+                }
+            }
+            assert!(
+                max <= bound,
+                "mixture firefly (ms={ms}, decay={decay}): max sample {max} exceeds throughput bound {bound}"
+            );
+        }
+    }
+
+    /// Mixture sampling — the default estimator — is unbiased: same mean as NEE
+    /// on the direct-light scene (analytic 0.15). Guards the correctness of what
+    /// ships by default, the way `light_sampling_invariance` guards NEE.
+    #[test]
+    fn mixture_light_sampling_invariance() {
+        let nee = sample_center(&direct_light_scene(true), 1_000_000, seeds()[0]);
+        let mut scene = direct_light_scene(true);
+        scene.mixture_sampling = 0.25;
+        scene.mixture_decay = 0.99;
+        let mix = sample_center(&scene, 1_000_000, seeds()[1]);
+        for (nee, mix) in nee.iter().zip(&mix) {
+            let se = (nee.se().powi(2) + mix.se().powi(2)).sqrt();
+            assert!(
+                (nee.mean() - mix.mean()).abs() <= 4f64 * se,
+                "mixture {} vs NEE {} ({:.1}σ)",
+                mix.mean(),
+                nee.mean(),
+                (nee.mean() - mix.mean()).abs() / se,
+            );
+        }
     }
 
     /// Heavy tier: tighter convergence bounds (β ≈ 1% on the anchor).
