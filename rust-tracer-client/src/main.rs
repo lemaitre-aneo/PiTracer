@@ -144,41 +144,29 @@ fn scene(cli: &Cli) -> Result<SceneDefinition, eyre::Report> {
     Ok(scene)
 }
 
-fn main() -> Result<(), eyre::Report> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
-    let cli = Cli::parse();
-    let definition = scene(&cli)?;
-    let (width, height) = (definition.camera.width, definition.camera.height);
-    ensure!(width > 0 && height > 0, "the image is empty");
-    ensure!(
-        cli.task_width > 0 && cli.task_height > 0,
-        "the task blocks are empty"
-    );
-    ensure!(definition.samples > 0, "no samples per pixel");
-    let poll_interval =
-        Duration::try_from_secs_f64(cli.poll_interval).wrap_err("invalid --poll-interval")?;
-
-    let convergence = Convergence {
+fn convergence(cli: &Cli) -> Convergence {
+    Convergence {
         error_threshold: cli.error_threshold,
         max_samples: cli.max_samples,
-    };
-    let mut options = HashMap::new();
-    convergence.to_options(&mut options);
-    // What the workers will read back, so invalid values fail here.
-    Convergence::from_options(&options).wrap_err("invalid convergence settings")?;
+    }
+}
 
-    let job = RenderJob {
+/// What a run renders: the scene file as it is now, with the command-line
+/// overrides. Called again before every run, so the scene can be edited
+/// while the demo runs.
+fn job(cli: &Cli) -> Result<RenderJob, eyre::Report> {
+    let definition = scene(cli)?;
+    let (width, height) = (definition.camera.width, definition.camera.height);
+    ensure!(width > 0 && height > 0, "the image is empty");
+    ensure!(definition.samples > 0, "no samples per pixel");
+    Ok(RenderJob {
         scene: encode_scene(&definition),
+        width,
+        height,
         blocks: blocks::tile(width, height, cli.task_width, cli.task_height),
         samples: definition.samples,
+        convergence: convergence(cli),
         task_options: TaskOptions {
-            options,
             max_duration: armonik::reexports::prost_types::Duration {
                 seconds: 300,
                 nanos: 0,
@@ -189,7 +177,33 @@ fn main() -> Result<(), eyre::Report> {
             ..Default::default()
         },
         partitions: cli.partition.iter().cloned().collect(),
-    };
+    })
+}
+
+fn main() -> Result<(), eyre::Report> {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    // Settings that do not depend on the scene file: checked once.
+    ensure!(
+        cli.task_width > 0 && cli.task_height > 0,
+        "the task blocks are empty"
+    );
+    let poll_interval =
+        Duration::try_from_secs_f64(cli.poll_interval).wrap_err("invalid --poll-interval")?;
+    let convergence = convergence(&cli);
+    let mut options = HashMap::new();
+    convergence.to_options(&mut options);
+    // What the workers will read back, so invalid values fail here.
+    Convergence::from_options(&options).wrap_err("invalid convergence settings")?;
+    // Without a previous scene to fall back on, the first load must succeed.
+    let first = job(&cli)?;
+    let (width, height, samples) = (first.width, first.height, first.samples);
 
     let runtime = tokio::runtime::Runtime::new()?;
     // Connect before opening the window, so a bad endpoint fails right away.
@@ -217,7 +231,17 @@ fn main() -> Result<(), eyre::Report> {
                     }
                 }
             });
-            demo::demo_loop(client, job, watcher, rerun_delay, events, command_receiver).await;
+            let reload = move || job(&cli);
+            demo::demo_loop(
+                client,
+                first,
+                reload,
+                watcher,
+                rerun_delay,
+                events,
+                command_receiver,
+            )
+            .await;
             _ = forward.await;
         })
     });
@@ -226,7 +250,7 @@ fn main() -> Result<(), eyre::Report> {
         &sdl,
         width,
         height,
-        (definition.samples, cli.max_samples),
+        (samples, convergence.max_samples),
         &commands,
     );
 
@@ -235,4 +259,74 @@ fn main() -> Result<(), eyre::Report> {
     demo.join()
         .map_err(|_| eyre::eyre!("the demo thread panicked"))?;
     shown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCENE: &str = "
+camera:
+  origin: [0, 0, 0]
+  direction: [0, 0, -1]
+  width: 40
+  height: 30
+samples: 8
+objects:
+  - type: sphere
+    radius: 1
+    position: [0, 0, -5]
+    emission: [1, 1, 1]
+";
+
+    fn cli(scene: &std::path::Path, extra: &[&str]) -> Cli {
+        let scene = scene.to_str().unwrap();
+        let args = [
+            "client",
+            "-e",
+            "localhost:1",
+            "-s",
+            scene,
+            "--task-width",
+            "16",
+        ];
+        Cli::try_parse_from(args.iter().chain(extra)).unwrap()
+    }
+
+    #[test]
+    fn job_reflects_the_scene_file_as_it_is_now() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("scene.yml");
+        std::fs::write(&path, SCENE).unwrap();
+
+        let first = job(&cli(&path, &[])).unwrap();
+        assert_eq!((first.width, first.height, first.samples), (40, 30, 8));
+        assert_eq!(first.blocks.len(), 3);
+        // Command-line overrides apply on every load.
+        let overridden = job(&cli(&path, &["-W", "64", "-S", "3"])).unwrap();
+        assert_eq!((overridden.width, overridden.samples), (64, 3));
+
+        // Edited while the demo runs.
+        std::fs::write(&path, SCENE.replace("width: 40", "width: 20")).unwrap();
+        let edited = job(&cli(&path, &[])).unwrap();
+        assert_eq!(edited.width, 20);
+        assert_ne!(edited.scene, first.scene);
+    }
+
+    #[test]
+    fn broken_scene_files_are_errors() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("scene.yml");
+        for broken in [
+            "objects: [",
+            "camera: {width: lots}",
+            &SCENE.replace("samples: 8", "samples: 0"),
+            &SCENE.replace("width: 40", "width: 0"),
+        ] {
+            std::fs::write(&path, broken).unwrap();
+            assert!(job(&cli(&path, &[])).is_err(), "{broken}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert!(job(&cli(&path, &[])).is_err());
+    }
 }

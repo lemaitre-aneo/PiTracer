@@ -12,23 +12,27 @@ use eyre::{Context, OptionExt, bail, ensure};
 use futures::stream::FuturesUnordered;
 use futures::{StreamExt, TryStreamExt};
 use raytracer::{
-    Block, BlockOutputs, BlockPayload, DISPLAY_NAME, DisplayBlock, FINAL_DISPLAY_NAME,
+    Block, BlockOutputs, BlockPayload, Convergence, DISPLAY_NAME, DisplayBlock, FINAL_DISPLAY_NAME,
     FINAL_LINEAR_NAME, PAYLOAD_NAME, SCENE_ID_OPTION, name,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::watcher::{ResultUpdate, ResultWatcher};
 
-/// Everything a run needs, identical from one run to the next.
+/// Everything a run needs.
 pub struct RenderJob {
     /// Encoded scene definition, shared by all the tasks of a session.
     pub scene: Vec<u8>,
+    /// Image size.
+    pub width: u32,
+    pub height: u32,
     /// Blocks to render, in submission order.
     pub blocks: Vec<Block>,
-    /// Samples per pixel.
+    /// Samples per pixel of each pass.
     pub samples: u32,
-    /// Default options of the session's tasks, convergence settings
-    /// included.
+    pub convergence: Convergence,
+    /// Default options of the session's tasks (the scene and the
+    /// convergence settings are added at submission).
     pub task_options: TaskOptions,
     /// Partitions the session may use (empty: the default partition).
     pub partitions: Vec<String>,
@@ -37,8 +41,18 @@ pub struct RenderJob {
 /// What a run reports to the display.
 #[derive(Debug)]
 pub enum RunEvent {
-    /// A new run starts: clear the image.
-    Reset { session_id: String },
+    /// A new run starts: clear the image, which is `width` x `height`;
+    /// blocks have from `samples.0` (one pass) to `samples.1` (the cap)
+    /// samples per pixel.
+    Reset {
+        session_id: String,
+        width: u32,
+        height: u32,
+        samples: (u32, u32),
+    },
+    /// The scene was reloaded for the coming run, or `error` tells why it
+    /// could not be (the previous scene is used again).
+    SceneReload { error: Option<String> },
     /// A display image of a block: an intermediate one, or the final one
     /// when `done`.
     Block { image: DisplayBlock, done: bool },
@@ -77,10 +91,12 @@ const DOWNLOAD_ATTEMPTS: u32 = 3;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Runs until a command quits, starting a new run `rerun_delay` after each
-/// one ends (or only on [`Command::Rerun`] without a delay).
+/// one ends (or only on [`Command::Rerun`] without a delay). Every run after
+/// the first renders `reload()`, or the previous job again if it fails.
 pub async fn demo_loop(
     client: Client,
-    job: RenderJob,
+    mut job: RenderJob,
+    mut reload: impl FnMut() -> eyre::Result<RenderJob> + Send,
     watcher: Box<dyn ResultWatcher>,
     rerun_delay: Option<Duration>,
     events: UnboundedSender<RunEvent>,
@@ -98,31 +114,54 @@ pub async fn demo_loop(
         .await
         {
             RunEnd::Interrupted(Command::Quit) => return,
-            RunEnd::Interrupted(_) => continue,
-            RunEnd::Ended => (),
-        }
-        if let Some(delay) = rerun_delay {
-            tracing::info!("next run in {delay:?} (R to start it now, Esc to quit)");
-        } else {
-            tracing::info!("press R to render again, Esc to quit");
-        }
-        let delay = async {
-            match rerun_delay {
-                Some(delay) => tokio::time::sleep(delay).await,
-                None => std::future::pending().await,
+            RunEnd::Interrupted(_) => (),
+            RunEnd::Ended => {
+                if !wait_for_rerun(rerun_delay, &mut commands).await {
+                    return;
+                }
             }
-        };
-        let mut delay = std::pin::pin!(delay);
-        loop {
-            tokio::select! {
-                () = &mut delay => break,
-                command = commands.recv() => match command {
-                    Some(Command::Rerun) => break,
-                    Some(Command::Quit) | None => return,
-                    // Nothing to pause between runs.
-                    Some(Command::TogglePause) => (),
-                },
+        }
+        match reload() {
+            Ok(reloaded) => {
+                job = reloaded;
+                _ = events.send(RunEvent::SceneReload { error: None });
             }
+            Err(err) => {
+                tracing::warn!("could not reload the scene, rendering the previous one: {err:#}");
+                _ = events.send(RunEvent::SceneReload {
+                    error: Some(format!("{err:#}")),
+                });
+            }
+        }
+    }
+}
+
+/// Waits until the next run is due; `false` to quit instead.
+async fn wait_for_rerun(
+    rerun_delay: Option<Duration>,
+    commands: &mut UnboundedReceiver<Command>,
+) -> bool {
+    if let Some(delay) = rerun_delay {
+        tracing::info!("next run in {delay:?} (R to start it now, Esc to quit)");
+    } else {
+        tracing::info!("press R to render again, Esc to quit");
+    }
+    let delay = async {
+        match rerun_delay {
+            Some(delay) => tokio::time::sleep(delay).await,
+            None => std::future::pending().await,
+        }
+    };
+    let mut delay = std::pin::pin!(delay);
+    loop {
+        tokio::select! {
+            () = &mut delay => return true,
+            command = commands.recv() => match command {
+                Some(Command::Rerun) => return true,
+                Some(Command::Quit) | None => return false,
+                // Nothing to pause between runs.
+                Some(Command::TogglePause) => (),
+            },
         }
     }
 }
@@ -154,6 +193,9 @@ pub async fn run(
     tracing::info!(session_id, "rendering {} blocks", job.blocks.len());
     _ = events.send(RunEvent::Reset {
         session_id: session_id.clone(),
+        width: job.width,
+        height: job.height,
+        samples: (job.samples, job.convergence.max_samples),
     });
 
     // Scoped so the render (its watcher and downloads) is dropped before the
@@ -353,6 +395,7 @@ async fn submit(
     task_options
         .options
         .insert(SCENE_ID_OPTION.into(), scene_id.clone());
+    job.convergence.to_options(&mut task_options.options);
 
     let by_name = |raws: Vec<armonik::results::Raw>| -> HashMap<String, String> {
         raws.into_iter()

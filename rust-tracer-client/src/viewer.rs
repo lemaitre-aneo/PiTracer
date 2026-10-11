@@ -22,13 +22,19 @@ struct Status {
 }
 
 impl Status {
-    fn title(&self) -> String {
+    /// `scene_error`: why the scene file could not be reloaded, if so.
+    fn title(&self, scene_error: Option<&str>) -> String {
         let mut title = format!("PiTracer on ArmoniK - {}/{}", self.done, self.total);
         match &self.finished {
             Some(None) => title.push_str(" - done"),
             Some(Some(error)) => title.push_str(&format!(" - failed: {error}")),
             None if self.paused => title.push_str(" (paused)"),
             None => (),
+        }
+        if let Some(error) = scene_error {
+            title.push_str(&format!(
+                " - scene not reloaded (previous one kept): {error}"
+            ));
         }
         title
     }
@@ -38,12 +44,13 @@ impl Status {
 /// or resumes the session, R starts a new run, F11 toggles fullscreen.
 /// Blocks still being refined are framed with a color going from blue to
 /// red as their sample count goes from `samples.0` (one pass) to `samples.1`
-/// (the cap).
+/// (the cap). The size and sample range are the first run's; each run's
+/// [`RunEvent::Reset`] updates them.
 pub fn run(
     sdl: &sdl2::Sdl,
-    width: u32,
-    height: u32,
-    samples: (u32, u32),
+    mut width: u32,
+    mut height: u32,
+    mut samples: (u32, u32),
     commands: &UnboundedSender<Command>,
 ) -> eyre::Result<()> {
     let video = sdl.video().map_err(eyre::Report::msg)?;
@@ -56,9 +63,10 @@ pub fn run(
     let texture_creator = canvas.texture_creator();
     let mut event_pump = sdl.event_pump().map_err(eyre::Report::msg)?;
 
-    let pitch = width as usize * 3;
+    let mut pitch = width as usize * 3;
     let mut pixels = vec![0u8; pitch * height as usize];
     let mut status = Status::default();
+    let mut scene_error = None;
 
     const PRESENT_INTERVAL: Duration = Duration::from_millis(15);
     let mut dirty = true;
@@ -79,15 +87,38 @@ pub fn run(
             // (the payload is moved out of a raw box; never clone user events).
             if let Some(event) = event.as_user_event_type::<RunEvent>() {
                 match event {
-                    RunEvent::Reset { session_id } => {
+                    RunEvent::Reset {
+                        session_id,
+                        width: new_width,
+                        height: new_height,
+                        samples: new_samples,
+                    } => {
                         tracing::debug!(session_id, "new run");
-                        pixels.fill(0);
                         status = Status::default();
+                        samples = new_samples;
+                        if (new_width, new_height) != (width, height) {
+                            // The scene file changed the image size.
+                            (width, height) = (new_width, new_height);
+                            pitch = width as usize * 3;
+                            pixels = vec![0u8; pitch * height as usize];
+                            let window = canvas.window_mut();
+                            if window.fullscreen_state() == sdl2::video::FullscreenType::Off {
+                                window.set_size(width, height)?;
+                            }
+                        } else {
+                            pixels.fill(0);
+                        }
                     }
+                    RunEvent::SceneReload { error } => scene_error = error,
                     RunEvent::Block { image, done } => {
-                        let outline =
-                            (!done).then(|| outline_color(image.samples, samples.0, samples.1));
-                        blit(&mut pixels, width, &image, outline);
+                        let block = image.block;
+                        if block.x + block.width <= width && block.y + block.height <= height {
+                            let outline =
+                                (!done).then(|| outline_color(image.samples, samples.0, samples.1));
+                            blit(&mut pixels, width, &image, outline);
+                        } else {
+                            tracing::warn!("dropping block {block:?}, outside the image");
+                        }
                     }
                     RunEvent::Progress { done, total } => {
                         status.done = done;
@@ -148,7 +179,7 @@ pub fn run(
         if title_dirty {
             canvas
                 .window_mut()
-                .set_title(&status.title())
+                .set_title(&status.title(scene_error.as_deref()))
                 .map_err(eyre::Report::msg)?;
             title_dirty = false;
         }

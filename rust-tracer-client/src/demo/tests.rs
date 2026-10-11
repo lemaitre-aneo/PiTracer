@@ -484,30 +484,28 @@ fn scene_bytes() -> Vec<u8> {
     encode_scene(&definition)
 }
 
-/// Never converges, so every block takes exactly 3 passes of 2 samples.
+/// Never converges, so every block takes exactly 3 passes of 2 samples
+/// (except the black ones, final after their first).
 fn job() -> RenderJob {
-    let mut options = HashMap::new();
-    Convergence {
-        error_threshold: 0.0,
-        max_samples: 6,
-    }
-    .to_options(&mut options);
     RenderJob {
         scene: scene_bytes(),
+        width: 16,
+        height: 12,
         // Uneven last column and row.
         blocks: crate::blocks::tile(16, 12, 5, 5),
         samples: 2,
-        task_options: TaskOptions {
-            options,
-            ..Default::default()
+        convergence: Convergence {
+            error_threshold: 0.0,
+            max_samples: 6,
         },
+        task_options: TaskOptions::default(),
         partitions: Vec::new(),
     }
 }
 
 /// The final accumulation of `block`, replaying its passes.
 fn expected_final(scene: &Scene, job: &RenderJob, block: Block) -> BlockResult {
-    let convergence = Convergence::from_options(&job.task_options.options).unwrap();
+    let convergence = job.convergence;
     let mut payload = BlockPayload {
         block,
         samples: job.samples,
@@ -610,8 +608,7 @@ async fn renders_every_block(watcher: &dyn ResultWatcher) {
     assert!(options.iter().all(|o| {
         let options = &o.as_ref().unwrap().options;
         options.contains_key(SCENE_ID_OPTION)
-            && Convergence::from_options(options).unwrap()
-                == Convergence::from_options(&job.task_options.options).unwrap()
+            && Convergence::from_options(options).unwrap() == job.convergence
     }));
 }
 
@@ -739,6 +736,7 @@ async fn demo_loop_reruns_until_quit() {
     let demo = tokio::spawn(demo_loop(
         client,
         job(),
+        || Ok(job()),
         Box::new(EventsWatcher),
         Some(Duration::from_millis(10)),
         events,
@@ -759,6 +757,58 @@ async fn demo_loop_reruns_until_quit() {
         calls.iter().filter(|c| *c == "create").count() >= 2,
         "{calls:?}"
     );
+}
+
+/// Each new run renders the reloaded scene, or the previous one when the
+/// reload fails.
+#[tokio::test]
+async fn demo_loop_reloads_the_scene_for_each_run() {
+    let fake = Fake::new(Behavior::Render);
+    let client = serve(fake.clone()).await;
+    let (events, mut received) = mpsc::unbounded_channel();
+    let (sender, commands) = mpsc::unbounded_channel();
+    let smaller = || {
+        let mut definition = decode_scene(&scene_bytes()).unwrap();
+        definition.camera.width = 8;
+        definition.camera.height = 6;
+        RenderJob {
+            scene: encode_scene(&definition),
+            width: 8,
+            height: 6,
+            blocks: crate::blocks::tile(8, 6, 5, 5),
+            ..job()
+        }
+    };
+    let mut reloads = vec![Ok(smaller()), Err(eyre::eyre!("bad scene"))];
+    let demo = tokio::spawn(demo_loop(
+        client,
+        job(),
+        move || reloads.pop().unwrap_or_else(|| Ok(job())),
+        Box::new(EventsWatcher),
+        Some(Duration::from_millis(10)),
+        events,
+        commands,
+    ));
+
+    // Run 1 (initial), 2 (reload failed: same scene), 3 (smaller scene).
+    let mut sizes = Vec::new();
+    let mut reloads = Vec::new();
+    let mut finished = 0;
+    while finished < 3 {
+        match within(received.recv()).await.unwrap() {
+            RunEvent::Reset { width, height, .. } => sizes.push((width, height)),
+            RunEvent::SceneReload { error } => reloads.push(error),
+            RunEvent::Finished { error } => {
+                assert_eq!(error, None);
+                finished += 1;
+            }
+            _ => (),
+        }
+    }
+    sender.send(Command::Quit).unwrap();
+    within(demo).await.unwrap();
+    assert_eq!(sizes, [(16, 12), (16, 12), (8, 6)]);
+    assert_eq!(reloads, [Some("bad scene".to_owned()), None]);
 }
 
 /// Results finished before the subscription come from the catch-up

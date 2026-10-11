@@ -1526,6 +1526,7 @@ dependencies = [
  "sdl2",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
