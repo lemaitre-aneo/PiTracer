@@ -7,7 +7,7 @@ mod flat;
 mod image;
 mod marble;
 
-pub use self::image::{Image, ImageError};
+pub use self::image::{DecodeError, Image, ImageError, SvgError};
 pub use flat::*;
 pub use marble::*;
 

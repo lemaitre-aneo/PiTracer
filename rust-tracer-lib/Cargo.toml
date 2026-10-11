@@ -19,6 +19,7 @@ fastnoise-lite = "1"
 oidn = { version = "=2.4.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.23.1"
+usvg = { version = "0.48.1", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.27.0"

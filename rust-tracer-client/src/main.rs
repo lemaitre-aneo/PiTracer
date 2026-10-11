@@ -378,8 +378,8 @@ objects:
         let folder = tempfile::tempdir().unwrap();
         std::fs::create_dir(folder.path().join("textures")).unwrap();
         std::fs::copy(
-            "../rust-tracer-standalone/armonik.png",
-            folder.path().join("textures/logo.png"),
+            "../rust-tracer-standalone/armonik.svg",
+            folder.path().join("textures/logo.svg"),
         )
         .unwrap();
         let logo = "
@@ -388,7 +388,7 @@ objects:
     u: [1, 0, 0]
     v: [0, 1, 0]
     texture: image
-    file: textures/logo.png
+    file: textures/logo.svg
 ";
         let path = folder.path().join("scene.yml");
         std::fs::write(&path, format!("{SCENE}{logo}")).unwrap();
@@ -397,9 +397,9 @@ objects:
         let raytracer::TextureEnum::Image(image) = &received.objects.last().unwrap().texture else {
             panic!("not an image texture");
         };
-        assert_eq!(image.size(), Some((2468, 654)));
+        assert_eq!(image.size(), Some((1234.0, 327.0)));
 
-        std::fs::remove_file(folder.path().join("textures/logo.png")).unwrap();
+        std::fs::remove_file(folder.path().join("textures/logo.svg")).unwrap();
         assert!(job(&cli(&path, &[])).is_err());
     }
 

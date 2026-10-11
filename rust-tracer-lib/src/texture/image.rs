@@ -9,6 +9,11 @@ use crate::{Color, Hit, Texture};
 
 use super::TextureProperty;
 
+mod svg;
+
+use svg::Svg;
+pub use svg::SvgError;
+
 mod definition {
     use std::path::PathBuf;
 
@@ -27,15 +32,20 @@ mod definition {
     }
 }
 
-/// A raster image (PNG or JPEG) mapped onto the surface coordinates: the
-/// whole image covers `(u, v)` in [0, 1]^2, `u` left to right and `v` bottom
-/// to top, clamped outside (quads map their corner `position` to the image's
-/// bottom-left, `u` along their `u` edge and `v` along their `v` edge).
+/// An image mapped onto the surface coordinates: the whole image covers
+/// `(u, v)` in [0, 1]^2, `u` left to right and `v` bottom to top (quads map
+/// their corner `position` to the image's bottom-left, `u` along their `u`
+/// edge and `v` along their `v` edge).
 ///
-/// Texels are sRGB, decoded to linear albedo; there is no emission. Alpha
+/// The file is a raster image (PNG or JPEG) or an SVG, told apart by its
+/// content. A raster image is filtered bilinearly (on alpha-premultiplied
+/// colors) and clamped to its edge texels outside [0, 1]^2. An SVG is
+/// evaluated exactly from its curves (see the `svg` module), and transparent
+/// outside its canvas.
+///
+/// Colors are sRGB, decoded to linear albedo; there is no emission. Alpha
 /// makes the surface transparent: a ray crosses it where the image is
 /// transparent, with probability `1 - alpha` (see [`Texture::opacity`]).
-/// Filtering is bilinear, on alpha-premultiplied colors.
 ///
 /// The image is read by [`Image::load`] (through
 /// [`crate::SceneDefinition::load_textures`]), and carried by the scene from
@@ -47,20 +57,67 @@ pub struct Image {
     data: Option<Arc<Encoded>>,
 }
 
-/// An image file and its decoded texels.
-#[derive(PartialEq)]
+/// An image file and its decoded picture.
 struct Encoded {
     bytes: Vec<u8>,
-    texels: Texels,
+    picture: Picture,
+}
+
+/// The picture is decoded from the bytes.
+impl PartialEq for Encoded {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
 }
 
 impl std::fmt::Debug for Encoded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Encoded")
             .field("bytes", &self.bytes.len())
-            .field("width", &self.texels.width)
-            .field("height", &self.texels.height)
+            .field("size", &self.picture.size())
             .finish()
+    }
+}
+
+enum Picture {
+    Raster(Texels),
+    Vector(Svg),
+}
+
+impl Picture {
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if ::image::guess_format(bytes).is_ok() {
+            Texels::decode(bytes)
+                .map(Picture::Raster)
+                .map_err(DecodeError::Raster)
+        } else {
+            Svg::parse(bytes)
+                .map(Picture::Vector)
+                .map_err(DecodeError::Svg)
+        }
+    }
+
+    /// Linear color premultiplied by alpha, and alpha.
+    fn sample(&self, u: f32, v: f32) -> ([f32; 3], f32) {
+        match self {
+            Picture::Raster(texels) => texels.sample(u, v),
+            Picture::Vector(svg) => svg.sample(u, v),
+        }
+    }
+
+    fn transparent(&self) -> bool {
+        match self {
+            Picture::Raster(texels) => texels.transparent,
+            // At least outside its canvas.
+            Picture::Vector(_) => true,
+        }
+    }
+
+    fn size(&self) -> (f64, f64) {
+        match self {
+            Picture::Raster(texels) => (texels.width as f64, texels.height as f64),
+            Picture::Vector(svg) => svg.size(),
+        }
     }
 }
 
@@ -134,10 +191,10 @@ impl Texels {
 impl Image {
     /// An image from the bytes of an image file.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ImageError> {
-        let texels = Texels::decode(&bytes).map_err(ImageError::Decode)?;
+        let picture = Picture::decode(&bytes).map_err(ImageError::Decode)?;
         Ok(Self {
             file: None,
-            data: Some(Arc::new(Encoded { bytes, texels })),
+            data: Some(Arc::new(Encoded { bytes, picture })),
         })
     }
 
@@ -153,17 +210,16 @@ impl Image {
             path: path.clone(),
             source,
         })?;
-        let texels =
-            Texels::decode(&bytes).map_err(|source| ImageError::DecodeFile { path, source })?;
-        self.data = Some(Arc::new(Encoded { bytes, texels }));
+        let picture =
+            Picture::decode(&bytes).map_err(|source| ImageError::DecodeFile { path, source })?;
+        self.data = Some(Arc::new(Encoded { bytes, picture }));
         Ok(())
     }
 
-    /// Width and height in texels, once loaded.
-    pub fn size(&self) -> Option<(usize, usize)> {
-        self.data
-            .as_ref()
-            .map(|data| (data.texels.width, data.texels.height))
+    /// Width and height once loaded: in texels for a raster image, in user
+    /// units for an SVG.
+    pub fn size(&self) -> Option<(f64, f64)> {
+        self.data.as_ref().map(|data| data.picture.size())
     }
 }
 
@@ -171,7 +227,7 @@ impl<R: crate::Rng + ?Sized> Texture<R> for Image {
     fn get(&self, hit: Hit, _rng: &mut R) -> TextureProperty {
         let attenuation = match &self.data {
             Some(data) => {
-                let ([r, g, b], alpha) = data.texels.sample(hit.u, hit.v);
+                let ([r, g, b], alpha) = data.picture.sample(hit.u, hit.v);
                 // The color of the opaque part: a hit on the surface is one
                 // the opacity test kept.
                 if alpha > 0.0 {
@@ -195,12 +251,12 @@ impl<R: crate::Rng + ?Sized> Texture<R> for Image {
     fn transparent(&self) -> bool {
         self.data
             .as_ref()
-            .is_some_and(|data| data.texels.transparent)
+            .is_some_and(|data| data.picture.transparent())
     }
 
     fn opacity(&self, hit: &Hit) -> f32 {
         match &self.data {
-            Some(data) => data.texels.sample(hit.u, hit.v).1,
+            Some(data) => data.picture.sample(hit.u, hit.v).1,
             None => 1.0,
         }
     }
@@ -252,10 +308,36 @@ pub enum ImageError {
     },
     DecodeFile {
         path: PathBuf,
-        source: ::image::ImageError,
+        source: DecodeError,
     },
-    Decode(::image::ImageError),
+    Decode(DecodeError),
     Base64(base64::DecodeError),
+}
+
+/// Why image bytes could not be decoded.
+#[derive(Debug)]
+pub enum DecodeError {
+    Raster(::image::ImageError),
+    /// Not a raster image, and not a usable SVG either.
+    Svg(SvgError),
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Raster(source) => source.fmt(f),
+            DecodeError::Svg(source) => source.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DecodeError::Raster(source) => source.source(),
+            DecodeError::Svg(source) => source.source(),
+        }
+    }
 }
 
 impl std::fmt::Display for ImageError {

@@ -42,7 +42,7 @@ fn srgb_decoding_matches_the_standard() {
 fn the_image_covers_the_unit_square_top_row_up() {
     // Top row red, bottom row blue.
     let image = image(1, 2, &[[255, 0, 0, 255], [0, 0, 255, 255]]);
-    assert_eq!(image.size(), Some((1, 2)));
+    assert_eq!(image.size(), Some((1.0, 2.0)));
     assert_eq!(
         attenuation(&image, 0.5, 0.75),
         Color {
@@ -120,14 +120,14 @@ fn a_loaded_image_travels_in_the_scene_json() {
     let mut image: Image = serde_json::from_str(r#"{"file": "logo.png"}"#).unwrap();
     assert_eq!(image.size(), None);
     image.load(folder.path()).unwrap();
-    assert_eq!(image.size(), Some((1, 1)));
+    assert_eq!(image.size(), Some((1.0, 1.0)));
 
     let json = serde_json::to_value(&image).unwrap();
     // The path would not resolve on a worker: only the data travels.
     assert!(json.get("file").is_none());
     assert!(json["data"].is_string());
     let received: Image = serde_json::from_value(json).unwrap();
-    assert_eq!(received.size(), Some((1, 1)));
+    assert_eq!(received.size(), Some((1.0, 1.0)));
     assert_eq!(
         attenuation(&received, 0.5, 0.5),
         attenuation(&image, 0.5, 0.5)
