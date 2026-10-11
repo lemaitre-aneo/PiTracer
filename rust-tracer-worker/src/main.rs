@@ -12,17 +12,23 @@ mod worker;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// ArmoniK deployments spell the values in lowercase.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum SocketType {
+    #[serde(alias = "tcp")]
     Tcp,
     #[default]
+    #[serde(alias = "unixdomainsocket")]
     UnixDomainSocket,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct GrpcChannel {
+    /// A socket path, or for TCP a URL (`http://localhost:10667`, as ArmoniK
+    /// deployments set it) or a bare socket address.
     address: String,
     #[serde(default)]
+    #[serde(alias = "sockettype")]
     socket_type: SocketType,
 }
 
@@ -84,7 +90,7 @@ async fn main() -> Result<(), eyre::Report> {
 
     tracing::trace!("{conf:?}");
 
-    let worker = Arc::new(worker::Worker::new(conf.agent_channel).await?);
+    let worker = Arc::new(worker::Worker::new(conf.agent_channel)?);
 
     let router = tonic::transport::Server::builder().add_service(
         armonik::api::v3::worker::worker_server::WorkerServer::from_arc(worker.clone()),
@@ -92,8 +98,18 @@ async fn main() -> Result<(), eyre::Report> {
 
     let mut service_future = tokio::spawn(async move {
         match conf.worker_channel.socket_type {
-            SocketType::Tcp => router.serve(conf.worker_channel.address.parse()?).await?,
+            SocketType::Tcp => {
+                router
+                    .serve(tcp_address(&conf.worker_channel.address).await?)
+                    .await?
+            }
             SocketType::UnixDomainSocket => {
+                // A socket file left over by a previous run would make the
+                // bind fail.
+                match std::fs::remove_file(&conf.worker_channel.address) {
+                    Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err)?,
+                    _ => (),
+                }
                 let uds = UnixListener::bind(conf.worker_channel.address)?;
                 let uds_stream = UnixListenerStream::new(uds);
 
@@ -119,16 +135,32 @@ async fn main() -> Result<(), eyre::Report> {
         }
         _ = wait_terminate() => {
             tracing::info!("Worker stopping");
+            service_future.abort();
+            _ = service_future.await;
         }
     }
-
-    service_future.abort();
-
-    _ = service_future.await;
 
     tracing::info!("Worker stopped");
 
     Ok(())
+}
+
+/// Socket address to listen on for a TCP channel address.
+async fn tcp_address(address: &str) -> Result<std::net::SocketAddr, eyre::Report> {
+    if let Ok(address) = address.parse() {
+        return Ok(address);
+    }
+    let uri: tonic::transport::Uri = address.parse()?;
+    let host = uri
+        .host()
+        .ok_or_else(|| eyre::eyre!("no host in {address}"))?;
+    let port = uri
+        .port_u16()
+        .ok_or_else(|| eyre::eyre!("no port in {address}"))?;
+    tokio::net::lookup_host((host, port))
+        .await?
+        .next()
+        .ok_or_else(|| eyre::eyre!("{address} resolves to no address"))
 }
 
 /// Wait for termination signal (either SIGINT or SIGTERM)

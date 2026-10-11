@@ -386,15 +386,28 @@ impl Scene {
     }
 
     pub fn pixel_radiance(&self, x: u32, y: u32, rng: &mut (impl crate::Rng + 'static)) -> Color {
+        self.pixel_radiance_with(x, y, self.samples, rng)
+    }
+
+    /// [`Scene::pixel_radiance`] with an explicit sample count instead of the
+    /// scene's own, so a shared scene can serve tasks asking for different
+    /// sample counts.
+    pub fn pixel_radiance_with(
+        &self,
+        x: u32,
+        y: u32,
+        samples: u32,
+        rng: &mut (impl crate::Rng + 'static),
+    ) -> Color {
         let mut color = Color::default();
-        for _ in 0..self.samples {
+        for _ in 0..samples {
             let x = x as f32 + rng.random::<f32>();
             let y = y as f32 + rng.random::<f32>();
 
             color += self.radiance(x, y, rng);
         }
 
-        color / self.samples as f32
+        color / samples as f32
     }
 
     pub fn to_u8_color(&self, color: Color) -> [u8; 3] {

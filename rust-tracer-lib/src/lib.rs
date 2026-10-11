@@ -8,6 +8,7 @@ mod hittable;
 mod material;
 mod onb;
 mod scene;
+mod task;
 mod texture;
 mod vector;
 
@@ -18,6 +19,7 @@ pub use hittable::*;
 pub use material::*;
 pub use onb::*;
 pub use scene::*;
+pub use task::*;
 pub use texture::*;
 pub use vector::*;
 

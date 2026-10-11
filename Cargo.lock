@@ -1382,6 +1382,7 @@ dependencies = [
  "fastnoise-lite",
  "rand",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1409,12 +1410,15 @@ dependencies = [
  "config",
  "eyre",
  "futures",
+ "hyper-util",
  "mimalloc",
  "rayon",
  "rust-tracer-lib",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

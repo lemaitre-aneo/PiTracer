@@ -17,3 +17,9 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 mimalloc = { version = "0.1", features = ["v3"] }
 rayon = "1.11"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+armonik = { version = "3.28.0-beta-0", features = ["worker", "agent", "serde"] }
+tempfile = "3"

@@ -1,0 +1,76 @@
+recursion_depth: 30
+samples: 100
+gamma: 3
+camera:
+  origin: [50, 52, 295.6]
+  direction: [0, -0.042612, -1]
+  field_of_view: 35
+objects:
+  # Top Light
+  # - type: sphere
+  #   radius: 600
+  #   position: [50, 681.33, 81.6]
+  #   emission: [1, 1, 1]
+  - type: sphere
+    radius: 1
+    position: [50, 81.6, 61.6]
+    emission: [10, 10, 10]
+  # Walls
+  # - type: quad
+  #   position: [1, -5, -5]
+  #   u: [0, 91.6, 0]
+  #   v: [0, 0, 310]
+  #   color: [0.75, 0.25, 0.25]
+  # - type: quad
+  #   position: [99, -5, -5]
+  #   u: [0, 91.6, 0]
+  #   v: [0, 0, 310]
+  #   color: [0.25, .75, 0.75]
+  # - type: quad
+  #   position: [-4, -5, 0]
+  #   u: [108, 0, 0]
+  #   v: [0, 91.6, 0]
+  #   color: [0.75, 0.75, 0.75]
+  # - type: quad
+  #   position: [-4, -5, 300]
+  #   u: [108, 0, 0]
+  #   v: [0, 91.6, 0]
+  # - type: quad
+  #   position: [-4, 0, -5]
+  #   u: [108, 0, 0]
+  #   v: [0, 0, 310]
+  #   color: [0.75, 0.75, 0.75]
+  # - type: quad
+  #   position: [-4, 81.6, -5]
+  #   u: [108, 0, 0]
+  #   v: [0, 0, 310]
+  #   color: [0.75, 0.75, 0.75]
+  # Balls
+  # - type: sphere
+  #   radius: 16.5
+  #   position: [40, 16.5, 47]
+  #   color: [.999, .999, .999]
+  #   material: Metal
+  #   fuzziness: 0.1
+  # - type: sphere
+  #   radius: 16.5
+  #   position: [73, 46.5, 88]
+  #   color: [.999, .999, .999]
+  #   material: Refraction
+  # - type: sphere
+  #   radius: 10
+  #   position: [15, 45, 112]
+  #   color: [.999, .999, .999]
+  # - type: sphere
+  #   radius: 15
+  #   position: [16, 16, 130]
+  #   color: [.999, .999, .0]
+  #   material: Refraction
+  - type: sphere
+    radius: 10
+    position: [80, 12, 92]
+    color: [0, .999, 0]
+  # - type: sphere
+  #   radius: 5
+  #   position: [50, 75, 81.6]
+  #   color: [0, .682, .999]
