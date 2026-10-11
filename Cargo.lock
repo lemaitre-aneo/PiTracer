@@ -1903,11 +1903,13 @@ dependencies = [
  "clap",
  "config",
  "eyre",
+ "image",
  "mimalloc",
  "rand",
  "rayon",
  "rust-tracer-lib",
  "sdl2",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

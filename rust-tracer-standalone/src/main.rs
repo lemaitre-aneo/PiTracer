@@ -65,6 +65,17 @@ pub struct Cli {
     /// throughput. Negative = use the scene file's value.
     #[arg(long, default_value = "-1")]
     pub mixture_decay: f32,
+
+    /// Render one frame (the scene's samples per pixel, or -S) into this
+    /// image file (format from the extension: png, jpg) and exit, without
+    /// opening a window
+    #[arg(long, value_name = "FILE")]
+    pub save: Option<std::path::PathBuf>,
+
+    /// No noise reduction: in the saved image, and at the viewer's start
+    /// (D still toggles it)
+    #[arg(long)]
+    pub no_denoise: bool,
 }
 
 fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
@@ -123,6 +134,34 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
     Ok(scene)
 }
 
+/// Renders one frame of `scene`, noise-reduced if `denoise` (and built
+/// with the `denoise` feature), into the image file at `path`.
+fn save(scene: &Scene, path: &std::path::Path, denoise: bool) -> Result<(), eyre::Report> {
+    let started = Instant::now();
+    #[allow(unused_mut)]
+    let mut radiance = crate::raytracer::render_frame(scene);
+    tracing::info!("rendered in {:#?}", started.elapsed());
+    let (width, height) = (scene.camera.width, scene.camera.height);
+    if denoise {
+        #[cfg(feature = "denoise")]
+        ::raytracer::Denoiser::default()
+            .denoise(&mut radiance, width as usize, height as usize)
+            .map_err(|err| eyre::eyre!("noise reduction failed: {err}"))?;
+        #[cfg(not(feature = "denoise"))]
+        tracing::warn!(
+            "built without the denoise feature: saving the image without noise reduction"
+        );
+    }
+    let bytes = radiance.iter().map(|&value| scene.to_u8(value)).collect();
+    let image = image::RgbImage::from_raw(width, height, bytes)
+        .ok_or_else(|| eyre::eyre!("the image is empty"))?;
+    image
+        .save(path)
+        .map_err(|err| eyre::eyre!("could not save {}: {err}", path.display()))?;
+    tracing::info!("saved {}", path.display());
+    Ok(())
+}
+
 pub fn main() -> Result<(), eyre::Report> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_span_events(
@@ -134,6 +173,9 @@ pub fn main() -> Result<(), eyre::Report> {
 
     let mut cli = Cli::parse();
     let scene = scene(&mut cli)?;
+    if let Some(path) = &cli.save {
+        return save(&scene, path, !cli.no_denoise);
+    }
 
     let sdl = sdl2::init().map_err(eyre::Report::msg)?;
     let video_subsystem = sdl.video().map_err(eyre::Report::msg)?;
@@ -161,6 +203,9 @@ pub fn main() -> Result<(), eyre::Report> {
     let pitch = width * 3;
     let scene = std::sync::Arc::new(scene);
     let mut display = Display::new(scene.clone(), denoiser::AVAILABLE);
+    if cli.no_denoise && display.enabled() {
+        display.toggle();
+    }
     let denoise_thread = DenoiseThread::spawn(width, height, events.event_sender());
     let mut paused = false;
     let title = |paused: bool, display: &Display| {
@@ -357,6 +402,37 @@ mod test {
         // mixture estimator so the test stays about NEE/PT.
         definition.mixture_sampling = 0.0;
         ::raytracer::Scene::from(definition)
+    }
+
+    /// The camera inside an emissive sphere that reflects nothing: every
+    /// sample of every pixel is exactly the emission.
+    #[test]
+    fn save_renders_one_frame_into_a_file() {
+        let definition = parse(
+            "
+camera: {origin: [0, 0, 0], direction: [0, 0, 1], width: 4, height: 3}
+samples: 2
+objects:
+  - type: sphere
+    radius: 10
+    position: [0, 0, 0]
+    color: [0, 0, 0]
+    emission: [0.25, 0.5, 0.75]
+",
+        )
+        .unwrap();
+        let scene = ::raytracer::Scene::from(definition);
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("render.png");
+        super::save(&scene, &path, false).unwrap();
+
+        let image = image::open(&path).unwrap().into_rgb8();
+        assert_eq!(image.dimensions(), (4, 3));
+        let expected = [0.25f32, 0.5, 0.75].map(|value| scene.to_u8(value));
+        assert!(image.pixels().all(|pixel| pixel.0 == expected));
+
+        // The format comes from the extension.
+        assert!(super::save(&scene, &folder.path().join("render.unknown"), false).is_err());
     }
 
     fn parse(yaml: &str) -> Result<::raytracer::SceneDefinition, config::ConfigError> {

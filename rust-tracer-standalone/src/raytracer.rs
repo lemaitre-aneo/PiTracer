@@ -168,6 +168,25 @@ pub fn render_thread(scene: Arc<Scene>, control: Arc<Control>, sender: EventSend
     }
 }
 
+/// Renders one frame (the scene's `samples` per pixel) in one go, rows in
+/// parallel: RGB f32 triplets, row-major, top row first.
+pub fn render_frame(scene: &Scene) -> Vec<f32> {
+    let width = scene.camera.width as usize;
+    let height = scene.camera.height as usize;
+    let seed_base = rand::rngs::StdRng::from_os_rng().random::<u64>();
+    // Never stopped.
+    let control = Control::new();
+    let mut radiance = vec![0f32; width * 3 * height];
+    radiance
+        .par_chunks_mut(width * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let mut rng = SmallRng::seed_from_u64(seed_base ^ y as u64);
+            render_row(scene, y, 1, row, &control, &mut rng);
+        });
+    radiance
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
