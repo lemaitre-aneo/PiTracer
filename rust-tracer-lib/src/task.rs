@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Camera, Color, Scene, SceneDefinition};
 
+/// Task option naming the result that holds the session's scene; every
+/// task lists that result among its data dependencies.
+pub const SCENE_ID_OPTION: &str = "sceneId";
+
 /// Rectangle of pixels, in display space (`y = 0` is the top row).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -8,11 +8,10 @@ use armonik::{Output, server, worker};
 use eyre::{Context, OptionExt, bail, ensure};
 use hyper_util::rt::TokioIo;
 use rayon::prelude::*;
-use raytracer::{BlockPayload, BlockResult, Color, Scene, decode_scene, render_block_row};
+use raytracer::{
+    BlockPayload, BlockResult, Color, SCENE_ID_OPTION, Scene, decode_scene, render_block_row,
+};
 use rust_tracer_worker::task_handler::TaskHandler;
-
-/// Task option naming the result that holds the session's scene.
-pub const SCENE_ID_OPTION: &str = "sceneId";
 
 pub struct Worker {
     agent: Agent<Channel>,

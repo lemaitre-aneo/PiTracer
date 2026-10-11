@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 raytracer = { path = "../rust-tracer-lib", package = "rust-tracer-lib" }
-armonik = { version = "3.28.0-beta-0", features = ["worker", "serde"] }
+armonik = { version = "3.29.3-beta-0", features = ["worker", "serde"] }
 async-stream = "0.3"
 futures = "0.3"
 config = "0.15"
@@ -21,5 +21,5 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
-armonik = { version = "3.28.0-beta-0", features = ["worker", "agent", "serde"] }
+armonik = { version = "3.29.3-beta-0", features = ["worker", "agent", "serde"] }
 tempfile = "3"
