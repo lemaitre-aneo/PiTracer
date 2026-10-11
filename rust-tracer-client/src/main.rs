@@ -236,7 +236,7 @@ fn main() -> Result<(), eyre::Report> {
     Convergence::from_options(&options).wrap_err("invalid convergence settings")?;
     // Without a previous scene to fall back on, the first load must succeed.
     let first = job(&cli)?;
-    let (width, height, samples) = (first.width, first.height, first.samples);
+    let (width, height) = (first.width, first.height);
 
     let runtime = tokio::runtime::Runtime::new()?;
     // Connect before opening the window, so a bad endpoint fails right away
@@ -287,13 +287,7 @@ fn main() -> Result<(), eyre::Report> {
         })
     });
 
-    let shown = viewer::run(
-        &sdl,
-        width,
-        height,
-        (samples, convergence.max_samples),
-        &commands,
-    );
+    let shown = viewer::run(&sdl, width, height, &commands);
 
     // Let the demo cancel and clean its session up before SDL goes away.
     _ = commands.send(Command::Quit);
@@ -355,6 +349,10 @@ objects:
         let first = job(&cli(&path, &[])).unwrap();
         assert_eq!((first.width, first.height, first.samples), (40, 30, 8));
         assert_eq!(first.blocks.len(), 3);
+        // Neither the scene file nor the command line: 50 samples per pass.
+        std::fs::write(&path, SCENE.replace("samples: 8\n", "")).unwrap();
+        assert_eq!(job(&cli(&path, &[])).unwrap().samples, 50);
+        std::fs::write(&path, SCENE).unwrap();
         // Command-line overrides apply on every load.
         let overridden = job(&cli(&path, &["-W", "64", "-S", "3"])).unwrap();
         assert_eq!((overridden.width, overridden.samples), (64, 3));

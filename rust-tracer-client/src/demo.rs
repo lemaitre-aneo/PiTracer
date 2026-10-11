@@ -49,14 +49,11 @@ pub struct RenderJob {
 /// What a run reports to the display.
 #[derive(Debug)]
 pub enum RunEvent {
-    /// A new run starts: clear the image, which is `width` x `height`;
-    /// blocks have from `samples.0` (one pass) to `samples.1` (the cap)
-    /// samples per pixel.
+    /// A new run starts: clear the image, which is `width` x `height`.
     Reset {
         session_id: String,
         width: u32,
         height: u32,
-        samples: (u32, u32),
     },
     /// The scene was reloaded for the coming run, or `error` tells why it
     /// could not be (the previous scene is used again).
@@ -206,7 +203,6 @@ pub async fn run(
         session_id: session_id.clone(),
         width: job.width,
         height: job.height,
-        samples: (job.samples, job.convergence.max_samples),
     });
 
     // Scoped so the render (its watcher and downloads) is dropped before the

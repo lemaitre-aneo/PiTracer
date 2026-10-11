@@ -193,9 +193,10 @@ pub struct Convergence {
 impl Default for Convergence {
     fn default() -> Self {
         Self {
-            // The Python client's default.
-            error_threshold: 5.0,
-            max_samples: 10_000,
+            // Fast enough for a demo: about 7 levels of RMS error left, and
+            // at most 20 passes of 50 samples.
+            error_threshold: 50.0,
+            max_samples: 1_000,
         }
     }
 }

@@ -33,25 +33,33 @@ pub fn blit(rgb: &mut [u8], image_width: u32, image: &DisplayBlock, outline: Opt
     }
 }
 
-/// Outline color of a block refined to `samples` samples per pixel: from
-/// blue at `min` to red at `max`, on a log scale (passes add samples
-/// linearly, but the noise only falls as their square root).
-pub fn outline_color(samples: u32, min: u32, max: u32) -> [u8; 3] {
-    let (samples, min, max) = (samples as f32, min.max(1) as f32, max.max(1) as f32);
-    let progress = if max > min {
-        ((samples.clamp(min, max) / min).ln() / (max / min).ln()).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    // Fully saturated hue, from 240 degrees (blue) down to 0 (red), in
-    // 60-degree segments.
-    let hue = (1.0 - progress) * 4.0;
-    let level = |fraction: f32| (fraction * 255.0).round() as u8;
-    match hue {
-        h if h <= 1.0 => [255, level(h), 0],
-        h if h <= 2.0 => [level(2.0 - h), 255, 0],
-        h if h <= 3.0 => [0, 255, level(h - 2.0)],
-        h => [0, level(4.0 - h), 255],
+/// Sample counts at which the outline is blue, and red.
+const OUTLINE_SAMPLES: (u32, u32) = (100, 500);
+
+/// Outline color of a block refined to `samples` samples per pixel, as the
+/// Python client (`Client/tracer/display.py`, `color_from_samples`): a fully
+/// saturated hue going linearly from 0.66 (blue) at 100 samples to 0 (red)
+/// at 500, clamped outside.
+pub fn outline_color(samples: u32) -> [u8; 3] {
+    let (min, max) = OUTLINE_SAMPLES;
+    let factor = f64::from(samples.clamp(min, max) - min) / f64::from(max - min);
+    hsv_to_rgb(0.66 * (1.0 - factor))
+}
+
+/// Python's `colorsys.hsv_to_rgb(hue, 1.0, 1.0)`, truncated to bytes like
+/// the Python client does.
+fn hsv_to_rgb(hue: f64) -> [u8; 3] {
+    let sector = (hue * 6.0).floor();
+    let f = hue * 6.0 - sector;
+    let byte = |fraction: f64| (fraction * 255.0) as u8;
+    let (rising, falling) = (byte(f), byte(1.0 - f));
+    match sector as i32 % 6 {
+        0 => [255, rising, 0],
+        1 => [falling, 255, 0],
+        2 => [0, 255, rising],
+        3 => [0, falling, 255],
+        4 => [rising, 0, 255],
+        _ => [255, 0, falling],
     }
 }
 
@@ -103,13 +111,15 @@ mod tests {
     }
 
     #[test]
-    fn outline_goes_from_blue_to_red() {
-        assert_eq!(outline_color(100, 100, 10_000), [0, 0, 255]);
-        assert_eq!(outline_color(1_000, 100, 10_000), [0, 255, 0]);
-        assert_eq!(outline_color(10_000, 100, 10_000), [255, 0, 0]);
-        // Clamped outside the range, and defined when it is empty.
-        assert_eq!(outline_color(1, 100, 10_000), [0, 0, 255]);
-        assert_eq!(outline_color(99_999, 100, 10_000), [255, 0, 0]);
-        assert_eq!(outline_color(5, 10, 10), [255, 0, 0]);
+    fn outline_matches_the_python_client() {
+        // Reference values from Python's `colorsys`, as the Python client.
+        assert_eq!(outline_color(100), [0, 10, 255]);
+        assert_eq!(outline_color(200), [0, 255, 247]);
+        assert_eq!(outline_color(300), [5, 255, 0]);
+        assert_eq!(outline_color(400), [255, 252, 0]);
+        assert_eq!(outline_color(500), [255, 0, 0]);
+        // Clamped outside the range.
+        assert_eq!(outline_color(1), [0, 10, 255]);
+        assert_eq!(outline_color(10_000), [255, 0, 0]);
     }
 }

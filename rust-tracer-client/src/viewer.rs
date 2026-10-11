@@ -43,14 +43,12 @@ impl Status {
 /// Shows the image until the window is closed (or Esc). Keys: Space pauses
 /// or resumes the session, R starts a new run, F11 toggles fullscreen.
 /// Blocks still being refined are framed with a color going from blue to
-/// red as their sample count goes from `samples.0` (one pass) to `samples.1`
-/// (the cap). The size and sample range are the first run's; each run's
-/// [`RunEvent::Reset`] updates them.
+/// red as their sample count goes from 100 to 500 (as the Python client).
+/// The size is the first run's; each run's [`RunEvent::Reset`] updates it.
 pub fn run(
     sdl: &sdl2::Sdl,
     mut width: u32,
     mut height: u32,
-    mut samples: (u32, u32),
     commands: &UnboundedSender<Command>,
 ) -> eyre::Result<()> {
     let video = sdl.video().map_err(eyre::Report::msg)?;
@@ -91,11 +89,9 @@ pub fn run(
                         session_id,
                         width: new_width,
                         height: new_height,
-                        samples: new_samples,
                     } => {
                         tracing::debug!(session_id, "new run");
                         status = Status::default();
-                        samples = new_samples;
                         if (new_width, new_height) != (width, height) {
                             // The scene file changed the image size.
                             (width, height) = (new_width, new_height);
@@ -113,8 +109,7 @@ pub fn run(
                     RunEvent::Block { image, done } => {
                         let block = image.block;
                         if block.x + block.width <= width && block.y + block.height <= height {
-                            let outline =
-                                (!done).then(|| outline_color(image.samples, samples.0, samples.1));
+                            let outline = (!done).then(|| outline_color(image.samples));
                             blit(&mut pixels, width, &image, outline);
                         } else {
                             tracing::warn!("dropping block {block:?}, outside the image");

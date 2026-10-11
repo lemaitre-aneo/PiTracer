@@ -45,7 +45,7 @@ impl Default for SceneDefinition {
             camera: Default::default(),
             objects: Default::default(),
             recursion_depth: 10,
-            samples: 100,
+            samples: 50,
             gamma: 2.2,
             light_sampling: true,
             // Mixture continuation sampling by default (overrides NEE): ~2.5-3.4x
