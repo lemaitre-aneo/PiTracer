@@ -22,7 +22,7 @@ objects:
     fuzziness: 0.1
   - type: sphere
     radius: 16.5
-    position: [73, 46.5, 88]
+    position: [73, 42.5, 88]
     color: [.999, .999, .999]
     material: Refraction
   - type: sphere
@@ -66,6 +66,15 @@ objects:
     u: [108, 0, 0]
     v: [0, 91.6, 0]
     color: [0.75, 0.75, 0.75]
+  # ArmoniK logo on the back wall (2468x654 image), 0.05 in front of it:
+  # coplanar it would tie-break per-ulp and speckle. Transparent around and
+  # inside the letters, where the wall shows through.
+  - type: quad
+    position: [22, 63, 0.05]
+    u: [56, 0, 0]
+    v: [0, 14.84, 0]
+    texture: image
+    file: armonik.png
   # Front (z = 300, behind the camera)
   - type: quad
     position: [-4, -5, 300]

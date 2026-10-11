@@ -141,6 +141,13 @@ fn scene(cli: &Cli) -> Result<SceneDefinition, eyre::Report> {
         .build()?
         .try_deserialize::<SceneDefinition>()
         .wrap_err_with(|| format!("could not load the scene {}", cli.scene))?;
+    // Texture files are relative to the scene file, and travel in the scene.
+    let folder = std::path::Path::new(&cli.scene)
+        .parent()
+        .unwrap_or(".".as_ref());
+    scene
+        .load_textures(folder)
+        .wrap_err_with(|| format!("could not load the textures of the scene {}", cli.scene))?;
     if cli.width != 0 {
         scene.camera.width = cli.width;
     }
@@ -362,6 +369,38 @@ objects:
         let edited = job(&cli(&path, &[])).unwrap();
         assert_eq!(edited.width, 20);
         assert_ne!(edited.scene, first.scene);
+    }
+
+    /// Texture files are read relative to the scene file, and travel inside
+    /// the scene the workers get.
+    #[test]
+    fn texture_files_travel_in_the_scene() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::create_dir(folder.path().join("textures")).unwrap();
+        std::fs::copy(
+            "../rust-tracer-standalone/armonik.png",
+            folder.path().join("textures/logo.png"),
+        )
+        .unwrap();
+        let logo = "
+  - type: quad
+    position: [0, 0, -1]
+    u: [1, 0, 0]
+    v: [0, 1, 0]
+    texture: image
+    file: textures/logo.png
+";
+        let path = folder.path().join("scene.yml");
+        std::fs::write(&path, format!("{SCENE}{logo}")).unwrap();
+
+        let received = raytracer::decode_scene(&job(&cli(&path, &[])).unwrap().scene).unwrap();
+        let raytracer::TextureEnum::Image(image) = &received.objects.last().unwrap().texture else {
+            panic!("not an image texture");
+        };
+        assert_eq!(image.size(), Some((2468, 654)));
+
+        std::fs::remove_file(folder.path().join("textures/logo.png")).unwrap();
+        assert!(job(&cli(&path, &[])).is_err());
     }
 
     #[test]

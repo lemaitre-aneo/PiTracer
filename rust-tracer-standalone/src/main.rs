@@ -72,6 +72,12 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
         .add_source(config::File::with_name(&cli.scene))
         .build()?
         .try_deserialize::<SceneDefinition>()?;
+    // Texture files are relative to the scene file.
+    scene.load_textures(
+        std::path::Path::new(&cli.scene)
+            .parent()
+            .unwrap_or(".".as_ref()),
+    )?;
     if cli.width == 0 {
         cli.width = scene.camera.width;
     } else {
@@ -344,6 +350,7 @@ mod test {
             .unwrap()
             .try_deserialize::<::raytracer::SceneDefinition>()
             .unwrap();
+        definition.load_textures(".".as_ref()).unwrap();
         definition.light_sampling = light_sampling;
         // This helper feeds the NEE/PT firefly-bound test, whose
         // 2*E*(depth+1) bound is the NEE invariant; disable the (now-default)
@@ -362,9 +369,9 @@ mod test {
 
     /// The shipped scene must survive the whole deserialization stack (config
     /// crate -> serde flatten -> the `type` tag -> the geometry definition
-    /// modules): 13 objects (ellipse light + 6 ball spheres, then 6 quad
-    /// walls), the marble ball's `texture:` tag, and a spot-checked wall
-    /// whose geometry and color arrived intact.
+    /// modules): 14 objects (ellipse light + 6 ball spheres, then 6 quad
+    /// walls and the logo quad), the marble ball's and the logo's `texture:`
+    /// tags, and a spot-checked wall whose geometry and color arrived intact.
     #[test]
     fn pitracer_yaml_parses_objects() {
         let definition = config::Config::builder()
@@ -373,21 +380,25 @@ mod test {
             .unwrap()
             .try_deserialize::<::raytracer::SceneDefinition>()
             .unwrap();
-        assert_eq!(definition.objects.len(), 13);
+        assert_eq!(definition.objects.len(), 14);
         let quads = definition
             .objects
             .iter()
             .filter(|o| matches!(o.geometry, ::raytracer::GeometryEnum::Quad(_)))
             .count();
-        assert_eq!(quads, 6);
+        assert_eq!(quads, 7);
         assert!(matches!(
             definition.objects[0].geometry,
             ::raytracer::GeometryEnum::Ellipse(_)
         ));
-        // the white ball carries the only `texture:` tag in the scene
+        // the white ball and the logo carry the scene's `texture:` tags
         assert!(matches!(
             definition.objects[3].texture,
             ::raytracer::TextureEnum::Marble(_)
+        ));
+        assert!(matches!(
+            definition.objects[10].texture,
+            ::raytracer::TextureEnum::Image(_)
         ));
 
         let left = &definition.objects[7];

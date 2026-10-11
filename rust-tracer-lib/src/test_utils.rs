@@ -275,6 +275,15 @@ pub(crate) fn assert_sampler_matches_pdf(
     }
 }
 
+/// A `width` x `height` PNG of the given RGBA texels (row-major, top row
+/// first).
+pub(crate) fn png(width: u32, height: u32, texels: &[[u8; 4]]) -> Vec<u8> {
+    let image = image::RgbaImage::from_vec(width, height, texels.concat()).unwrap();
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

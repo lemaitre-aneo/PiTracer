@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -50,14 +50,34 @@ impl<G, M, T> Object<G, M, T> {
     }
 }
 
-impl<G: Geometry, M: std::fmt::Debug, T: std::fmt::Debug> Geometry for Object<G, M, T> {
+/// The texture's transparency is applied here, at intersection, so that
+/// every ray (camera, continuation, shadow) sees through it alike: a hit is
+/// kept with probability [`Texture::opacity`], otherwise the ray goes on to
+/// the surface's next crossing (the far side of a sphere, nothing for a
+/// quad). Stochastic alpha is unbiased: on average a ray is stopped by the
+/// fraction of coverage, which also anti-aliases the image's edges.
+impl<G: Geometry, M: std::fmt::Debug, T: Texture> Geometry for Object<G, M, T> {
     fn hit<'a, 'b>(
         &'a self,
         origin: Vector,
         direction: UnitVector,
         rng: &'b mut (dyn RngCore + 'static),
     ) -> Option<(f32, &'a dyn HitCaster)> {
-        self.geometry.hit(origin, direction, rng)
+        let (mut distance, mut caster) = self.geometry.hit(origin, direction, rng)?;
+        if !self.texture.transparent() {
+            return Some((distance, caster));
+        }
+        loop {
+            let hit = self.geometry.to_hit(origin, direction, distance);
+            let opacity = self.texture.opacity(&hit);
+            if opacity >= 1.0 || rng.random::<f32>() < opacity {
+                return Some((distance, caster));
+            }
+            let beyond = hit.spawn(direction);
+            let (further, next) = self.geometry.hit(beyond, direction, rng)?;
+            distance = (beyond + further * direction - origin).dot(direction);
+            caster = next;
+        }
     }
 
     fn to_hit(&self, origin: Vector, direction: UnitVector, distance: f32) -> Hit {
@@ -90,5 +110,13 @@ impl<R: crate::Rng + ?Sized, G: std::fmt::Debug, M: std::fmt::Debug, T: Texture<
 {
     fn get(&self, hit: Hit, rng: &mut R) -> TextureProperty {
         self.texture.get(hit, rng)
+    }
+
+    fn transparent(&self) -> bool {
+        self.texture.transparent()
+    }
+
+    fn opacity(&self, hit: &Hit) -> f32 {
+        self.texture.opacity(hit)
     }
 }

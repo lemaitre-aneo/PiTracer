@@ -58,6 +58,17 @@ impl Default for SceneDefinition {
     }
 }
 
+impl SceneDefinition {
+    /// Reads the files the textures refer to, relative to `base` (the scene
+    /// file's folder). From then on the scene carries their contents, also
+    /// when serialized: call it after reading a scene file.
+    pub fn load_textures(&mut self, base: &std::path::Path) -> Result<(), crate::ImageError> {
+        self.objects
+            .iter_mut()
+            .try_for_each(|object| object.texture.load(base))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(from = "SceneDefinition")]
 pub struct Scene {
@@ -109,6 +120,9 @@ fn build_textured<G: Geometry + Send + Sync + 'static>(
         }
         TextureEnum::Marble(marble) => {
             build_hittable(Object::new(object.geometry, object.material, marble))
+        }
+        TextureEnum::Image(image) => {
+            build_hittable(Object::new(object.geometry, object.material, image))
         }
     }
 }
@@ -958,6 +972,60 @@ mod test {
         let stats = sample_center(&scene, 100_000, seeds()[1]);
         for stats in stats {
             assert_stat_close(stats.mean(), stats.se(), 0.15f32, 4f32, 0f32);
+        }
+    }
+
+    /// `direct_light_scene` with a black quad of opacity `alpha` between the
+    /// floor point P and the light, covering the light's whole cone from P
+    /// (half-width 0.3 at height 0.5, where the cone's radius is 0.1) but
+    /// not the camera ray (at x = 0.5 there). Every path from P to the light
+    /// crosses the quad, so the radiance is exactly (1 - alpha) * 0.15:
+    /// shadow rays (ON) and BRDF rays (OFF) must both see through it.
+    fn veiled_light_scene(alpha: u8, light_sampling: bool) -> Scene {
+        let mut veil = quad_lambertian(
+            (-0.3f32, 0.5f32, -0.3f32),
+            (0.6f32, 0f32, 0f32),
+            (0f32, 0f32, 0.6f32),
+            (0f32, 0f32, 0f32),
+            (0f32, 0f32, 0f32),
+        );
+        veil.texture = TextureEnum::Image(
+            crate::Image::from_bytes(crate::test_utils::png(1, 1, &[[0, 0, 0, alpha]])).unwrap(),
+        );
+        scene(
+            (1.2f32, 1.2f32, 0f32),
+            (-1.2f32, -1.2f32, 0f32),
+            vec![
+                lambertian(
+                    (0f32, -100f32, 0f32),
+                    100f32,
+                    (0.75f32, 0.75f32, 0.75f32),
+                    (0f32, 0f32, 0f32),
+                ),
+                lambertian(
+                    (0f32, 1f32, 0f32),
+                    0.2f32,
+                    (0f32, 0f32, 0f32),
+                    (5f32, 5f32, 5f32),
+                ),
+                veil,
+            ],
+            5,
+            light_sampling,
+        )
+    }
+
+    #[test]
+    fn light_crosses_transparent_surfaces() {
+        let alpha = 96u8;
+        let expected = (1f32 - f32::from(alpha) / 255f32) * 0.15f32;
+        for (light_sampling, n, seed) in
+            [(true, 100_000, seeds()[0]), (false, 1_000_000, seeds()[1])]
+        {
+            let stats = sample_center(&veiled_light_scene(alpha, light_sampling), n, seed);
+            for stats in stats {
+                assert_stat_close(stats.mean(), stats.se(), expected, 4f32, 0f32);
+            }
         }
     }
 
