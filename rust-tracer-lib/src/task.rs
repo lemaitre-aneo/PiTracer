@@ -79,6 +79,34 @@ impl Block {
     }
 }
 
+/// Tiles a `width` x `height` image with blocks of at most
+/// `block_width` x `block_height` pixels (the last row and column are
+/// clipped to the image), ordered from the image center outwards so the
+/// middle of the picture shows up first.
+pub fn tile_grid(width: u32, height: u32, block_width: u32, block_height: u32) -> Vec<Block> {
+    let mut blocks: Vec<_> = (0..height)
+        .step_by(block_height as usize)
+        .flat_map(|y| {
+            (0..width)
+                .step_by(block_width as usize)
+                .map(move |x| Block {
+                    x,
+                    y,
+                    width: block_width.min(width - x),
+                    height: block_height.min(height - y),
+                })
+        })
+        .collect();
+    // Twice the distance between centers, to stay in integers.
+    let distance2 = |block: &Block| {
+        let dx = (2 * block.x + block.width) as i64 - width as i64;
+        let dy = (2 * block.y + block.height) as i64 - height as i64;
+        dx * dx + dy * dy
+    };
+    blocks.sort_by_key(distance2);
+    blocks
+}
+
 /// Ids of the two final results of a block, expected by every task of its
 /// chain (each delegating them to the next one).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,6 +561,11 @@ pub enum WireError {
         name: &'static str,
         value: String,
     },
+    /// The inputs of a denoising task do not cover its tile exactly once,
+    /// or lack the block being denoised.
+    IncompleteTile {
+        tile: Block,
+    },
 }
 
 impl std::fmt::Display for WireError {
@@ -558,6 +591,10 @@ impl std::fmt::Display for WireError {
             WireError::InvalidOption { name, value } => {
                 write!(f, "invalid task option {name}={value:?}")
             }
+            WireError::IncompleteTile { tile } => write!(
+                f,
+                "the inputs do not cover the denoising tile {tile:?} exactly once, block included"
+            ),
         }
     }
 }

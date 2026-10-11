@@ -12,8 +12,10 @@ use eyre::{Context, OptionExt, bail, ensure};
 use futures::stream::FuturesUnordered;
 use futures::{StreamExt, TryStreamExt};
 use raytracer::{
-    Block, BlockOutputs, BlockPayload, Convergence, DISPLAY_NAME, DisplayBlock, FINAL_DISPLAY_NAME,
-    FINAL_LINEAR_NAME, PAYLOAD_NAME, SCENE_ID_OPTION, name,
+    Block, BlockOutputs, BlockPayload, Convergence, DENOISE_PAYLOAD_NAME, DENOISE_PRIORITY,
+    DENOISED_DISPLAY_NAME, DENOISED_LINEAR_NAME, DISPLAY_NAME, DenoiseInput, DenoisePayload,
+    DisplayBlock, FINAL_DISPLAY_NAME, FINAL_LINEAR_NAME, PAYLOAD_NAME, SCENE_ID_OPTION, TaskType,
+    name, neighborhood,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -31,6 +33,10 @@ pub struct RenderJob {
     /// Samples per pixel of each pass.
     pub samples: u32,
     pub convergence: Convergence,
+    /// Denoise each block from its neighbourhood once final: the denoised
+    /// display images are then the ones the run waits for (the converged
+    /// ones show as progress meanwhile).
+    pub denoise: bool,
     /// Default options of the session's tasks (the scene and the
     /// convergence settings are added at submission).
     pub task_options: TaskOptions,
@@ -396,6 +402,9 @@ async fn submit(
         .options
         .insert(SCENE_ID_OPTION.into(), scene_id.clone());
     job.convergence.to_options(&mut task_options.options);
+    TaskType::PathTracing.to_options(&mut task_options.options);
+    // The final linear result of each block, the denoising tasks' input.
+    let mut finals = HashMap::new();
 
     let by_name = |raws: Vec<armonik::results::Raw>| -> HashMap<String, String> {
         raws.into_iter()
@@ -474,7 +483,95 @@ async fn submit(
             .await
             .wrap_err("could not submit the tasks")?;
         for payload in payloads {
-            // The receiver only goes away once the run is over.
+            if job.denoise {
+                finals.insert(payload.block, payload.outputs.linear);
+            } else {
+                // The receiver only goes away once the run is over.
+                _ = submitted.send((payload.outputs.display, payload.block));
+            }
+        }
+    }
+    if !job.denoise {
+        return Ok(());
+    }
+
+    // Denoising tasks, once every block's final results exist: each depends
+    // on those of its neighbourhood, so it starts as soon as they are done.
+    TaskType::Denoising.to_options(&mut task_options.options);
+    task_options.priority = DENOISE_PRIORITY;
+    for blocks in job.blocks.chunks(BATCH_SIZE) {
+        let outputs = by_name(
+            results
+                .create_metadata(
+                    session_id,
+                    blocks.iter().flat_map(|block| {
+                        [DENOISED_LINEAR_NAME, DENOISED_DISPLAY_NAME].map(|prefix| {
+                            armonik::results::create_metadata::RequestItem {
+                                name: name(prefix, block),
+                                ..Default::default()
+                            }
+                        })
+                    }),
+                )
+                .await
+                .wrap_err("could not create the denoised results")?,
+        );
+        let payloads = blocks
+            .iter()
+            .map(|&block| {
+                let inputs = neighborhood(&job.blocks, &block, job.width, job.height)
+                    .into_iter()
+                    .map(|neighbour| DenoiseInput {
+                        block: neighbour,
+                        result: finals[&neighbour].clone(),
+                    })
+                    .collect();
+                Ok(DenoisePayload {
+                    block,
+                    inputs,
+                    outputs: BlockOutputs {
+                        linear: id(&outputs, DENOISED_LINEAR_NAME, &block)?,
+                        display: id(&outputs, DENOISED_DISPLAY_NAME, &block)?,
+                    },
+                })
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+        let payload_ids = by_name(
+            results
+                .create(
+                    session_id,
+                    payloads
+                        .iter()
+                        .map(|payload| armonik::results::create::RequestItem {
+                            name: name(DENOISE_PAYLOAD_NAME, &payload.block),
+                            data: payload.encode(),
+                            ..Default::default()
+                        }),
+                )
+                .await
+                .wrap_err("could not upload the denoising payloads")?,
+        );
+        let items = payloads
+            .iter()
+            .map(|payload| {
+                Ok(armonik::tasks::submit::RequestItem {
+                    payload_id: id(&payload_ids, DENOISE_PAYLOAD_NAME, &payload.block)?,
+                    expected_output_keys: vec![
+                        payload.outputs.linear.clone(),
+                        payload.outputs.display.clone(),
+                    ],
+                    data_dependencies: std::iter::once(scene_id.clone())
+                        .chain(payload.inputs.iter().map(|input| input.result.clone()))
+                        .collect(),
+                    task_options: None,
+                })
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+        tasks
+            .submit(session_id, Some(task_options.clone()), items)
+            .await
+            .wrap_err("could not submit the denoising tasks")?;
+        for payload in payloads {
             _ = submitted.send((payload.outputs.display, payload.block));
         }
     }

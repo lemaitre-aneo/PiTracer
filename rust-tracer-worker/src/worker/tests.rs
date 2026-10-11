@@ -15,8 +15,9 @@ use armonik::reexports::{tokio, tonic};
 use armonik::server::{AgentService, RequestContext, WorkerService};
 use armonik::{Output, TaskOptions, worker};
 use raytracer::{
-    Block, BlockOutputs, BlockPayload, BlockResult, Convergence, DisplayBlock, Scene,
-    SceneDefinition, decode_scene, encode_scene, render_block_row,
+    Block, BlockOutputs, BlockPayload, BlockResult, Color, Convergence, DenoiseInput,
+    DenoisePayload, DisplayBlock, Scene, SceneDefinition, TaskType, Tile, decode_scene,
+    encode_scene, render_block_row, tile_grid,
 };
 
 use super::*;
@@ -608,6 +609,155 @@ async fn failures_are_reported_in_the_output() {
     }
     assert_eq!(harness.notified(), []);
     assert!(harness.submitted().is_empty());
+}
+
+/// Noisy blocks of a uniform 0.4 grey over the scene's 16x12 image: the
+/// 96-pixel halo makes any block's tile the whole image.
+fn noisy_grid() -> Vec<BlockResult> {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(3);
+    tile_grid(16, 12, 8, 6)
+        .into_iter()
+        .map(|block| BlockResult {
+            block,
+            samples: 10 + block.x,
+            pixels: (0..block.len())
+                .map(|_| {
+                    let mut value = || 0.4 + rng.random_range(-0.2..0.2);
+                    Color {
+                        r: value(),
+                        g: value(),
+                        b: value(),
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+const DENOISED_LINEAR: &str = "denoised-linear";
+const DENOISED_DISPLAY: &str = "denoised-display";
+
+/// A denoising request for `block` over `inputs`, written to the harness.
+fn denoise_request(
+    harness: &Harness,
+    block: Block,
+    inputs: &[BlockResult],
+) -> worker::process::Request {
+    let inputs: Vec<_> = inputs
+        .iter()
+        .map(|input| {
+            let id = format!("input-{}-{}", input.block.x, input.block.y);
+            harness.write(&id, input.encode());
+            DenoiseInput {
+                block: input.block,
+                result: id,
+            }
+        })
+        .collect();
+    let payload = DenoisePayload {
+        block,
+        inputs: inputs.clone(),
+        outputs: BlockOutputs {
+            linear: DENOISED_LINEAR.into(),
+            display: DENOISED_DISPLAY.into(),
+        },
+    };
+    harness.write("denoise", payload.encode());
+    let mut request = harness.request("scene", "denoise");
+    TaskType::Denoising.to_options(&mut request.task_options.options);
+    request.expected_output_keys = vec![DENOISED_LINEAR.into(), DENOISED_DISPLAY.into()];
+    request
+        .data_dependencies
+        .extend(inputs.into_iter().map(|input| input.result));
+    request
+}
+
+#[tokio::test]
+async fn a_denoising_task_denoises_its_block_from_the_neighbourhood() {
+    let harness = harness().await;
+    let inputs = noisy_grid();
+    let block = inputs[3].block;
+    assert_eq!(
+        harness
+            .process(denoise_request(&harness, block, &inputs))
+            .await,
+        Output::Ok
+    );
+
+    let denoised = BlockResult::decode(&harness.read(DENOISED_LINEAR)).unwrap();
+    assert_eq!(denoised.block, block);
+    assert_eq!(denoised.samples, inputs[3].samples);
+    // OIDN over the assembled tile, cropped.
+    let mut tile = Tile::assemble(&block, 16, 12, &inputs).unwrap();
+    crate::oidn_filter::Denoiser::default()
+        .denoise(&mut tile.color, 16, 12)
+        .unwrap();
+    assert_eq!(denoised, tile.crop(&block));
+    let error = |result: &BlockResult| {
+        result
+            .pixels
+            .iter()
+            .flat_map(|p| [p.r, p.g, p.b])
+            .map(|c| ((c - 0.4) as f64).powi(2))
+            .sum::<f64>()
+    };
+    let (before, after) = (error(&inputs[3]), error(&denoised));
+    println!("squared error {before} -> {after}");
+    assert!(after < before / 4.0, "{before} -> {after}");
+
+    let display = DisplayBlock::decode(&harness.read(DENOISED_DISPLAY)).unwrap();
+    assert_eq!(
+        display,
+        denoised.to_display(&Scene::from(scene_definition()))
+    );
+    let notified: Vec<_> = harness
+        .notified()
+        .into_iter()
+        .flat_map(|request| request.result_ids)
+        .collect();
+    assert_eq!(notified, [DENOISED_LINEAR, DENOISED_DISPLAY]);
+}
+
+#[tokio::test]
+async fn denoising_failures_are_reported_in_the_output() {
+    let harness = harness().await;
+    let inputs = noisy_grid();
+    let block = inputs[3].block;
+    // Each case is processed right away: they share the data folder.
+    let expect_error = async |message: &str, request| match harness.process(request).await {
+        Output::Error { details } => assert!(details.contains(message), "{message}: {details}"),
+        Output::Ok => panic!("{message}: task succeeded"),
+    };
+
+    let mut request = denoise_request(&harness, block, &inputs);
+    request.data_dependencies.pop();
+    expect_error("is not a data dependency", request).await;
+
+    let request = denoise_request(&harness, block, &inputs);
+    // The input declared as block (0, 0) holds another one.
+    let other = BlockResult {
+        block: inputs[1].block,
+        ..inputs[0].clone()
+    };
+    harness.write("input-0-0", other.encode());
+    expect_error("holds block", request).await;
+
+    let request = denoise_request(&harness, block, &inputs[1..]);
+    expect_error("do not cover the denoising tile", request).await;
+
+    let mut request = denoise_request(&harness, block, &inputs);
+    request.expected_output_keys.pop();
+    expect_error("names", request).await;
+
+    let mut request = denoise_request(&harness, block, &inputs);
+    request
+        .task_options
+        .options
+        .insert(raytracer::TASK_TYPE_OPTION.into(), "sharpening".into());
+    expect_error("invalid task option", request).await;
+
+    assert_eq!(harness.notified(), []);
 }
 
 #[tokio::test]

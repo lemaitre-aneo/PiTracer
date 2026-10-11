@@ -19,7 +19,11 @@ mimalloc = { version = "0.1", features = ["v3"] }
 rayon = "1.11"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tower = { version = "0.5", features = ["util"] }
+# Pinned to the Open Image Denoise version it links against (shell.nix,
+# Dockerfile): the crate's versions track the library's.
+oidn = "=2.4.1"
 
 [dev-dependencies]
 armonik = { version = "3.29.3-beta-0", features = ["worker", "agent", "serde"] }
 tempfile = "3"
+rand = "0.9"

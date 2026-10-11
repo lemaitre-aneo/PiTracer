@@ -14,8 +14,8 @@ use armonik::server::{RequestContext, ResultsService, SessionsService, TasksServ
 use armonik::{FilterStringOperator, events, results, sessions, tasks};
 use clap::Parser;
 use raytracer::{
-    BlockResult, Convergence, LINEAR_NAME, Scene, accumulate, decode_scene, encode_scene,
-    render_block_row,
+    BlockResult, Convergence, DenoisePayload, LINEAR_NAME, Scene, TaskType, Tile, accumulate,
+    decode_scene, encode_scene, render_block_row,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -150,9 +150,38 @@ impl Fake {
         filters.or.is_empty() || filters.or.iter().any(|and| and.and.iter().all(matches))
     }
 
-    /// Runs one block's chain of tasks the way rust-tracer-worker does,
-    /// passes inline instead of as submitted follow-ups.
+    /// The status of `result_id` once it is final: ArmoniK only runs a
+    /// task once its data dependencies are.
+    fn wait_final(&self, result_id: &str) -> ResultStatus {
+        loop {
+            let status = self.results.lock().unwrap()[result_id].status.clone();
+            if matches!(status, ResultStatus::Completed | ResultStatus::Aborted) {
+                return status;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Runs one task the way rust-tracer-worker does: a path-tracing task
+    /// runs its block's chain of passes (inline instead of as submitted
+    /// follow-ups), a denoising task its block's tile through
+    /// [`stand_in_denoise`] instead of OIDN.
     fn execute(&self, session_id: &str, options: &TaskOptions, task: &tasks::submit::RequestItem) {
+        let statuses: Vec<_> = task
+            .data_dependencies
+            .iter()
+            .map(|id| self.wait_final(id))
+            .collect();
+        if statuses.contains(&ResultStatus::Aborted) {
+            for output in &task.expected_output_keys {
+                self.finish(output, ResultStatus::Aborted, None);
+            }
+            return;
+        }
+        if TaskType::from_options(&options.options).unwrap() == TaskType::Denoising {
+            self.denoise(options, task);
+            return;
+        }
         match self.behavior {
             Behavior::Hang => (),
             Behavior::Abort => {
@@ -203,6 +232,65 @@ impl Fake {
             }
         }
     }
+}
+
+impl Fake {
+    fn denoise(&self, options: &TaskOptions, task: &tasks::submit::RequestItem) {
+        let scene_id = &options.options[SCENE_ID_OPTION];
+        let scene = Scene::from(decode_scene(&self.data(scene_id)).unwrap());
+        let payload = DenoisePayload::decode(&self.data(&task.payload_id)).unwrap();
+        assert_eq!(
+            task.expected_output_keys,
+            [
+                payload.outputs.linear.clone(),
+                payload.outputs.display.clone()
+            ]
+        );
+        let inputs: Vec<_> = payload
+            .inputs
+            .iter()
+            .map(|input| {
+                assert!(task.data_dependencies.contains(&input.result));
+                BlockResult::decode(&self.data(&input.result)).unwrap()
+            })
+            .collect();
+        let denoised = stand_in_denoise(&scene, &payload.block, &inputs);
+        self.finish(
+            &payload.outputs.linear,
+            ResultStatus::Completed,
+            Some(denoised.encode()),
+        );
+        self.finish(
+            &payload.outputs.display,
+            ResultStatus::Completed,
+            Some(denoised.to_display(&scene).encode()),
+        );
+    }
+}
+
+/// The denoising tasks' stand-in for OIDN: a 3x3 box blur over the tile, so
+/// that a block's result depends on its neighbours' pixels.
+fn stand_in_denoise(scene: &Scene, block: &Block, inputs: &[BlockResult]) -> BlockResult {
+    let (width, height) = (scene.camera.width, scene.camera.height);
+    let mut tile = Tile::assemble(block, width, height, inputs).unwrap();
+    let (w, h) = (tile.area.width as i64, tile.area.height as i64);
+    let source = tile.color.clone();
+    for y in 0..h {
+        for x in 0..w {
+            for channel in 0..3 {
+                let (mut sum, mut count) = (0f32, 0f32);
+                for (dx, dy) in (-1..=1).flat_map(|dx| (-1..=1).map(move |dy| (dx, dy))) {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if (0..w).contains(&nx) && (0..h).contains(&ny) {
+                        sum += source[((ny * w + nx) * 3 + channel) as usize];
+                        count += 1.0;
+                    }
+                }
+                tile.color[((y * w + x) * 3 + channel) as usize] = sum / count;
+            }
+        }
+    }
+    tile.crop(block)
 }
 
 /// One pass, as the worker renders it.
@@ -492,12 +580,13 @@ fn job() -> RenderJob {
         width: 16,
         height: 12,
         // Uneven last column and row.
-        blocks: crate::blocks::tile(16, 12, 5, 5),
+        blocks: raytracer::tile_grid(16, 12, 5, 5),
         samples: 2,
         convergence: Convergence {
             error_threshold: 0.0,
             max_samples: 6,
         },
+        denoise: false,
         task_options: TaskOptions::default(),
         partitions: Vec::new(),
     }
@@ -538,10 +627,10 @@ async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
         .expect("timed out")
 }
 
-async fn renders_every_block(watcher: &dyn ResultWatcher) {
+async fn renders_every_block(watcher: &dyn ResultWatcher, denoise: bool) {
     let fake = Fake::new(Behavior::Render);
     let client = serve(fake.clone()).await;
-    let job = job();
+    let job = RenderJob { denoise, ..job() };
     let (events, mut received) = mpsc::unbounded_channel();
     let (_commands, mut commands) = mpsc::unbounded_channel();
 
@@ -565,6 +654,11 @@ async fn renders_every_block(watcher: &dyn ResultWatcher) {
         }
     }
     assert_eq!(images.len(), job.blocks.len());
+    let finals: HashMap<Block, BlockResult> = job
+        .blocks
+        .iter()
+        .map(|block| (*block, expected_final(&scene, &job, *block)))
+        .collect();
     let mut final_passes = 0;
     for block in &job.blocks {
         let shown = &images[block];
@@ -582,12 +676,21 @@ async fn renders_every_block(watcher: &dyn ResultWatcher) {
         let (_, done, image) = shown.last().unwrap();
         assert!(*done, "{block:?}: {counts:?}");
         assert_eq!(shown.iter().filter(|(_, done, _)| *done).count(), 1);
-        let expected = expected_final(&scene, &job, *block);
+        let expected = if denoise {
+            let neighbours: Vec<_> =
+                raytracer::neighborhood(&job.blocks, block, job.width, job.height)
+                    .iter()
+                    .map(|neighbour| finals[neighbour].clone())
+                    .collect();
+            stand_in_denoise(&scene, block, &neighbours)
+        } else {
+            finals[block].clone()
+        };
         assert_eq!(**image, expected.to_display(&scene));
         // 3 passes, or 1 for the black ones.
-        match expected.samples {
+        match finals[block].samples {
             6 => final_passes += 1,
-            2 => assert!(expected.is_black()),
+            2 => assert!(finals[block].is_black()),
             samples => panic!("{block:?}: {samples} samples"),
         }
     }
@@ -605,23 +708,52 @@ async fn renders_every_block(watcher: &dyn ResultWatcher) {
 
     assert_eq!(fake.calls(), ["create", "close", "purge", "delete"]);
     let options = fake.submitted_options.lock().unwrap();
-    assert!(options.iter().all(|o| {
-        let options = &o.as_ref().unwrap().options;
-        options.contains_key(SCENE_ID_OPTION)
-            && Convergence::from_options(options).unwrap() == job.convergence
+    let (rendering, denoising): (Vec<_>, Vec<_>) = options
+        .iter()
+        .map(|o| o.as_ref().unwrap())
+        .partition(|o| TaskType::from_options(&o.options).unwrap() == TaskType::PathTracing);
+    assert!(!rendering.is_empty());
+    assert_eq!(denoising.is_empty(), !denoise);
+    assert!(rendering.iter().chain(&denoising).all(|options| {
+        options.options.contains_key(SCENE_ID_OPTION)
+            && Convergence::from_options(&options.options).unwrap() == job.convergence
     }));
+    assert!(
+        denoising
+            .iter()
+            .all(|options| options.priority == raytracer::DENOISE_PRIORITY)
+    );
 }
 
 #[tokio::test]
 async fn renders_every_block_with_events() {
-    renders_every_block(&EventsWatcher).await;
+    renders_every_block(&EventsWatcher, false).await;
 }
 
 #[tokio::test]
 async fn renders_every_block_with_polling() {
-    renders_every_block(&PollingWatcher {
-        interval: Duration::from_millis(10),
-    })
+    renders_every_block(
+        &PollingWatcher {
+            interval: Duration::from_millis(10),
+        },
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn denoises_every_block_with_events() {
+    renders_every_block(&EventsWatcher, true).await;
+}
+
+#[tokio::test]
+async fn denoises_every_block_with_polling() {
+    renders_every_block(
+        &PollingWatcher {
+            interval: Duration::from_millis(10),
+        },
+        true,
+    )
     .await;
 }
 
@@ -676,9 +808,13 @@ async fn aborted_result_fails_and_cancels_the_session() {
     let (events, mut received) = mpsc::unbounded_channel();
     let (_commands, mut commands) = mpsc::unbounded_channel();
 
+    let job = RenderJob {
+        denoise: true,
+        ..job()
+    };
     let end = within(run(
         &client,
-        &job(),
+        &job,
         &EventsWatcher,
         SEED,
         &events,
@@ -775,7 +911,7 @@ async fn demo_loop_reloads_the_scene_for_each_run() {
             scene: encode_scene(&definition),
             width: 8,
             height: 6,
-            blocks: crate::blocks::tile(8, 6, 5, 5),
+            blocks: raytracer::tile_grid(8, 6, 5, 5),
             ..job()
         }
     };

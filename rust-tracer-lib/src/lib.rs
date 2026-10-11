@@ -3,6 +3,7 @@ pub(crate) mod test_utils;
 
 mod camera;
 mod color;
+mod denoise;
 mod geometry;
 mod hittable;
 mod material;
@@ -14,6 +15,7 @@ mod vector;
 
 pub use camera::*;
 pub use color::*;
+pub use denoise::*;
 pub use geometry::*;
 pub use hittable::*;
 pub use material::*;

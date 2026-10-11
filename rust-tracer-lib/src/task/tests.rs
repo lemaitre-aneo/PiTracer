@@ -493,3 +493,40 @@ fn row_streams_are_distinct() {
         }
     }
 }
+
+#[test]
+fn tiles_cover_the_image_exactly_once() {
+    for (width, height, bw, bh) in [(16, 12, 4, 4), (17, 13, 5, 3), (3, 2, 60, 60), (1, 1, 1, 1)] {
+        let mut covered = vec![0; (width * height) as usize];
+        for block in tile_grid(width, height, bw, bh) {
+            assert!(
+                block.width >= 1 && block.width <= bw && block.height >= 1 && block.height <= bh
+            );
+            for y in block.y..block.y + block.height {
+                for x in block.x..block.x + block.width {
+                    covered[(y * width + x) as usize] += 1;
+                }
+            }
+        }
+        assert!(
+            covered.iter().all(|&n| n == 1),
+            "{width}x{height} by {bw}x{bh}"
+        );
+    }
+}
+
+#[test]
+fn tiles_start_from_the_center() {
+    let blocks = tile_grid(30, 30, 10, 10);
+    assert_eq!(
+        blocks[0],
+        Block {
+            x: 10,
+            y: 10,
+            width: 10,
+            height: 10
+        }
+    );
+    // Corners come last.
+    assert!(blocks[5..].iter().all(|b| b.x != 10 && b.y != 10));
+}

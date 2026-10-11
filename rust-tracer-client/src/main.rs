@@ -4,7 +4,7 @@ use std::time::Duration;
 use armonik::TaskOptions;
 use clap::Parser;
 use eyre::{Context, ensure};
-use raytracer::{Convergence, SceneDefinition, encode_scene};
+use raytracer::{Convergence, DENOISE_ALIGNMENT, SceneDefinition, encode_scene};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::demo::{Command, RenderJob, RunEvent};
@@ -67,13 +67,18 @@ pub struct Cli {
     #[arg(long, default_value = "-1")]
     pub mixture_decay: f32,
 
-    /// Width of a task's block, in pixels
-    #[arg(long, default_value = "60")]
+    /// Width of a task's block, in pixels (a multiple of 16 when denoising)
+    #[arg(long, default_value = "64")]
     pub task_width: u32,
 
-    /// Height of a task's block, in pixels
-    #[arg(long, default_value = "60")]
+    /// Height of a task's block, in pixels (a multiple of 16 when denoising)
+    #[arg(long, default_value = "64")]
     pub task_height: u32,
+
+    /// Do not denoise the blocks (Open Image Denoise, in denoising tasks,
+    /// each over the neighbourhood of its block) once they are final
+    #[arg(long)]
+    pub no_denoise: bool,
 
     /// A block is done once the estimated mean squared error of its display
     /// image, in 8-bit levels, is at most this
@@ -163,9 +168,10 @@ fn job(cli: &Cli) -> Result<RenderJob, eyre::Report> {
         scene: encode_scene(&definition),
         width,
         height,
-        blocks: blocks::tile(width, height, cli.task_width, cli.task_height),
+        blocks: raytracer::tile_grid(width, height, cli.task_width, cli.task_height),
         samples: definition.samples,
         convergence: convergence(cli),
+        denoise: !cli.no_denoise,
         task_options: TaskOptions {
             max_duration: armonik::reexports::prost_types::Duration {
                 seconds: 300,
@@ -193,6 +199,14 @@ fn main() -> Result<(), eyre::Report> {
     ensure!(
         cli.task_width > 0 && cli.task_height > 0,
         "the task blocks are empty"
+    );
+    // Denoising tiles are grown from blocks, and must stay aligned.
+    ensure!(
+        cli.no_denoise
+            || (cli.task_width % DENOISE_ALIGNMENT == 0
+                && cli.task_height % DENOISE_ALIGNMENT == 0),
+        "denoising needs task blocks whose sizes are multiples of {DENOISE_ALIGNMENT} pixels \
+         (or --no-denoise)"
     );
     let poll_interval =
         Duration::try_from_secs_f64(cli.poll_interval).wrap_err("invalid --poll-interval")?;

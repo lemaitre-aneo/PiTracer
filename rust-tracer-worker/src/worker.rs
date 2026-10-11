@@ -9,10 +9,13 @@ use eyre::{Context, OptionExt, ensure};
 use hyper_util::rt::TokioIo;
 use rayon::prelude::*;
 use raytracer::{
-    BlockPayload, BlockResult, Color, Convergence, DISPLAY_NAME, LINEAR_NAME, PAYLOAD_NAME,
-    SCENE_ID_OPTION, Scene, accumulate, decode_scene, name, render_block_row,
+    BlockOutputs, BlockPayload, BlockResult, Color, Convergence, DISPLAY_NAME, DenoisePayload,
+    LINEAR_NAME, PAYLOAD_NAME, SCENE_ID_OPTION, Scene, TaskType, Tile, accumulate, decode_scene,
+    name, render_block_row, validate_denoise,
 };
 use rust_tracer_worker::task_handler::TaskHandler;
+
+use crate::oidn_filter::Denoiser;
 
 /// Priority of the follow-up passes, above the client's first passes (1):
 /// blocks already started finish before new ones start, so the finished
@@ -24,6 +27,7 @@ pub struct Worker {
     /// Last scene used, by result id: consecutive tasks of a session share
     /// their scene, so it is parsed once per worker rather than per task.
     scene: Mutex<Option<(String, Arc<Scene>)>>,
+    denoiser: Arc<Denoiser>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -58,6 +62,7 @@ impl Worker {
         Ok(Self {
             agent: Agent::with_channel(channel),
             scene: Mutex::default(),
+            denoiser: Arc::default(),
         })
     }
 
@@ -65,26 +70,12 @@ impl Worker {
     /// previous ones; sends the block's final results once done, or else
     /// delegates them to a follow-up pass.
     async fn render_task(&self, mut handler: TaskHandler) -> eyre::Result<()> {
-        let scene_id = handler
-            .task_options()
-            .options
-            .get(SCENE_ID_OPTION)
-            .ok_or_eyre("the sceneId task option is missing")?
-            .clone();
-        let scene = self.scene(&handler, &scene_id).await?;
+        let (scene_id, scene) = self.task_scene(&handler).await?;
         let payload = BlockPayload::decode(handler.payload()).wrap_err("invalid payload")?;
         payload
             .validate(&scene.camera)
             .wrap_err("invalid payload")?;
-        let mut expected = handler.expected_results().to_vec();
-        expected.sort();
-        let mut outputs = [&payload.outputs.linear, &payload.outputs.display];
-        outputs.sort();
-        ensure!(
-            expected.iter().eq(outputs),
-            "the task expects {expected:?}, but its payload names {:?} as the block's results",
-            payload.outputs
-        );
+        check_outputs(&handler, &payload.outputs)?;
         let convergence = Convergence::from_options(&handler.task_options().options)?;
         let previous = match &payload.previous {
             Some(previous) => Some(
@@ -127,6 +118,62 @@ impl Worker {
         }
     }
 
+    /// Denoises the task's block from the final linear results of its
+    /// neighbourhood, and sends the block's denoised results.
+    async fn denoise_task(&self, mut handler: TaskHandler) -> eyre::Result<()> {
+        let (_, scene) = self.task_scene(&handler).await?;
+        let payload = DenoisePayload::decode(handler.payload()).wrap_err("invalid payload")?;
+        validate_denoise(&payload, &scene.camera).wrap_err("invalid payload")?;
+        check_outputs(&handler, &payload.outputs)?;
+        let mut inputs = Vec::with_capacity(payload.inputs.len());
+        for input in &payload.inputs {
+            let result = BlockResult::decode(&handler.data_dependency(&input.result).await?)
+                .wrap_err_with(|| format!("invalid input {}", input.result))?;
+            ensure!(
+                result.block == input.block,
+                "input {} holds block {:?}, expected {:?}",
+                input.result,
+                result.block,
+                input.block
+            );
+            inputs.push(result);
+        }
+
+        let block = payload.block;
+        let (width, height) = (scene.camera.width, scene.camera.height);
+        let denoiser = self.denoiser.clone();
+        let denoised = spawn_blocking_cancellable(move |_| -> eyre::Result<BlockResult> {
+            let mut tile = Tile::assemble(&block, width, height, &inputs)?;
+            let area = tile.area;
+            denoiser.denoise(&mut tile.color, area.width as usize, area.height as usize)?;
+            Ok(tile.crop(&block))
+        })
+        .await??;
+        tracing::debug!(?block, "block denoised");
+
+        handler
+            .send_result(&payload.outputs.linear, denoised.encode())
+            .await?;
+        handler
+            .send_result(
+                &payload.outputs.display,
+                denoised.to_display(&scene).encode(),
+            )
+            .await
+    }
+
+    /// The task's scene, named by its `sceneId` option, with that id.
+    async fn task_scene(&self, handler: &TaskHandler) -> eyre::Result<(String, Arc<Scene>)> {
+        let scene_id = handler
+            .task_options()
+            .options
+            .get(SCENE_ID_OPTION)
+            .ok_or_eyre("the sceneId task option is missing")?
+            .clone();
+        let scene = self.scene(handler, &scene_id).await?;
+        Ok((scene_id, scene))
+    }
+
     /// The scene `scene_id`, from the cache or else parsed from the task's
     /// data dependency.
     async fn scene(&self, handler: &TaskHandler, scene_id: &str) -> eyre::Result<Arc<Scene>> {
@@ -152,6 +199,20 @@ impl Worker {
             Some((scene_id.to_owned(), scene.clone()));
         Ok(scene)
     }
+}
+
+/// Checks that the task is expected to produce exactly the results its
+/// payload names.
+fn check_outputs(handler: &TaskHandler, outputs: &BlockOutputs) -> eyre::Result<()> {
+    let mut expected = handler.expected_results().to_vec();
+    expected.sort();
+    let mut named = [&outputs.linear, &outputs.display];
+    named.sort();
+    ensure!(
+        expected.iter().eq(named),
+        "the task expects {expected:?}, but its payload names {outputs:?} as its results",
+    );
+    Ok(())
 }
 
 /// Hands the block over to a follow-up pass: creates the accumulation
@@ -265,7 +326,10 @@ impl server::WorkerService for Worker {
         let result = tracing::Instrument::instrument(
             async {
                 let handler = TaskHandler::new(request, self.agent.clone()).await?;
-                self.render_task(handler).await
+                match TaskType::from_options(&handler.task_options().options)? {
+                    TaskType::PathTracing => self.render_task(handler).await,
+                    TaskType::Denoising => self.denoise_task(handler).await,
+                }
             },
             span.clone(),
         )
