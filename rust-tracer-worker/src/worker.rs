@@ -10,12 +10,10 @@ use hyper_util::rt::TokioIo;
 use rayon::prelude::*;
 use raytracer::{
     BlockOutputs, BlockPayload, BlockResult, Color, Convergence, DISPLAY_NAME, DenoisePayload,
-    LINEAR_NAME, PAYLOAD_NAME, SCENE_ID_OPTION, Scene, TaskType, Tile, accumulate, decode_scene,
-    name, render_block_row, validate_denoise,
+    Denoiser, LINEAR_NAME, PAYLOAD_NAME, SCENE_ID_OPTION, Scene, TaskType, Tile, accumulate,
+    decode_scene, name, render_block_row, validate_denoise,
 };
 use rust_tracer_worker::task_handler::TaskHandler;
-
-use crate::oidn_filter::Denoiser;
 
 /// Priority of the follow-up passes, above the client's first passes (1):
 /// blocks already started finish before new ones start, so the finished

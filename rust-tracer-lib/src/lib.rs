@@ -7,6 +7,8 @@ mod denoise;
 mod geometry;
 mod hittable;
 mod material;
+#[cfg(feature = "denoise")]
+mod oidn_filter;
 mod onb;
 mod scene;
 mod task;
@@ -19,6 +21,8 @@ pub use denoise::*;
 pub use geometry::*;
 pub use hittable::*;
 pub use material::*;
+#[cfg(feature = "denoise")]
+pub use oidn_filter::{DenoiseError, Denoiser};
 pub use onb::*;
 pub use scene::*;
 pub use task::*;

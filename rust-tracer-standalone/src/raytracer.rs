@@ -1,5 +1,8 @@
 //! Progressive row-streaming renderer.
 //!
+//! Rows are streamed as linear radiance: what the window shows of them (raw
+//! or noise-reduced) is the UI thread's business (`display`).
+//!
 //! A dedicated render thread owns the radiance accumulator and loops full-image
 //! iterations; rayon workers each own one row at a time (`chunks_mut` +
 //! `par_bridge`, handing rows out in top-to-bottom order), so all rendering
@@ -26,10 +29,13 @@ use sdl2::event::EventSender;
 /// `Event::as_user_event_type::<ViewerEvent>()`. Never clone a user event and
 /// never extract twice: the payload is moved out of a raw box.
 pub enum ViewerEvent {
-    /// One finished row of pixels (tight `width * 3` RGB24 bytes).
-    Row { y: usize, pixels: Vec<u8> },
-    /// A full pass over the image completed.
-    IterationDone { iter: u32 },
+    /// One finished row: its running mean radiance (RGB f32 triplets).
+    Row { y: usize, radiance: Vec<f32> },
+    /// A full pass over the image completed: the frame, for noise reduction.
+    IterationDone { iter: u32, snapshot: Arc<Vec<f32>> },
+    /// A frame was denoised (by the denoising thread).
+    #[cfg_attr(not(feature = "denoise"), allow(dead_code))]
+    Denoised(crate::display::Denoised),
 }
 
 /// Control surface shared between the UI and the render thread.
@@ -109,17 +115,9 @@ fn render_row(
     true
 }
 
-/// Converts a radiance row to tight RGB24 bytes.
-fn convert_row(scene: &Scene, accumulator: &[f32]) -> Vec<u8> {
-    accumulator
-        .iter()
-        .map(|&value| scene.to_u8(value))
-        .collect()
-}
-
 /// Body of the render thread: loops full-image iterations until stopped,
 /// streaming each finished row to the UI through `sender`.
-pub fn render_thread(scene: Scene, control: Arc<Control>, sender: EventSender) {
+pub fn render_thread(scene: Arc<Scene>, control: Arc<Control>, sender: EventSender) {
     let width = scene.camera.width as usize;
     let height = scene.camera.height as usize;
     // Per-(iteration, row) rngs are seeded through SplitMix (`seed_from_u64`),
@@ -147,11 +145,11 @@ pub fn render_thread(scene: Scene, control: Arc<Control>, sender: EventSender) {
             .for_each(|(y, accumulator)| {
                 let mut rng = SmallRng::seed_from_u64(seed_base ^ ((iter as u64) << 32) ^ y as u64);
                 if render_row(&scene, y, iter, accumulator, &control, &mut rng) {
-                    let pixels = convert_row(&scene, accumulator);
+                    let radiance = accumulator.to_vec();
                     // A full queue only costs a stale row until the next
                     // iteration repaints it.
                     if sender
-                        .push_custom_event(ViewerEvent::Row { y, pixels })
+                        .push_custom_event(ViewerEvent::Row { y, radiance })
                         .is_err()
                     {
                         tracing::debug!("dropped row {y} (event queue full or shutting down)");
@@ -163,8 +161,9 @@ pub fn render_thread(scene: Scene, control: Arc<Control>, sender: EventSender) {
             break;
         }
         tracing::info!("iteration #{iter}: finished in {:#?}", started.elapsed());
+        let snapshot = Arc::new(radiance.clone());
         sender
-            .push_custom_event(ViewerEvent::IterationDone { iter })
+            .push_custom_event(ViewerEvent::IterationDone { iter, snapshot })
             .ok();
     }
 }
@@ -272,16 +271,6 @@ mod test {
             accumulator.iter().all(|&v| v == 0f32),
             "stopped row must stay untouched"
         );
-    }
-
-    #[test]
-    fn convert_row_matches_scene_to_u8() {
-        let scene = test_scene();
-        let accumulator = [0f32, 0.25, 0.5, 0.75, 1.0, 2.0];
-        let converted = convert_row(&scene, &accumulator);
-        for (byte, value) in converted.iter().zip(accumulator) {
-            assert_eq!(*byte, scene.to_u8(value));
-        }
     }
 
     #[test]

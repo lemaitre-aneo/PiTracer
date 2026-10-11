@@ -6,7 +6,6 @@ use tokio::net::UnixListener;
 use tracing as _;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod oidn_filter;
 mod worker;
 
 #[cfg(not(miri))]

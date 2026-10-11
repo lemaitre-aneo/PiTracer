@@ -690,7 +690,7 @@ async fn a_denoising_task_denoises_its_block_from_the_neighbourhood() {
     assert_eq!(denoised.samples, inputs[3].samples);
     // OIDN over the assembled tile, cropped.
     let mut tile = Tile::assemble(&block, 16, 12, &inputs).unwrap();
-    crate::oidn_filter::Denoiser::default()
+    raytracer::Denoiser::default()
         .denoise(&mut tile.color, 16, 12)
         .unwrap();
     assert_eq!(denoised, tile.crop(&block));

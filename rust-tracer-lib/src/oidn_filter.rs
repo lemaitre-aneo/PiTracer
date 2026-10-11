@@ -1,8 +1,7 @@
-//! Open Image Denoise, as used by the denoising tasks.
+//! Open Image Denoise (the `denoise` feature), as used by the worker's
+//! denoising tasks and the standalone viewer.
 
 use std::sync::{Mutex, PoisonError};
-
-use eyre::eyre;
 
 /// A lazily created OIDN CPU device. Devices are costly to create, and not
 /// `Sync`: denoising calls are serialized, which costs nothing, since OIDN
@@ -24,7 +23,12 @@ impl Denoiser {
     /// for HDR images denoised in tiles (an automatic one would differ from
     /// tile to tile and show seams): 1.0, which OIDN maps to 100 cd/m², about
     /// display white, as in our radiance.
-    pub fn denoise(&self, color: &mut [f32], width: usize, height: usize) -> eyre::Result<()> {
+    pub fn denoise(
+        &self,
+        color: &mut [f32],
+        width: usize,
+        height: usize,
+    ) -> Result<(), DenoiseError> {
         let mut device = self.device.lock().unwrap_or_else(PoisonError::into_inner);
         let device = device.get_or_insert_with(oidn::Device::cpu);
         oidn::RayTracing::new(device)
@@ -32,13 +36,25 @@ impl Denoiser {
             .input_scale(1.0)
             .image_dimensions(width, height)
             .filter_in_place(color)
-            .map_err(|err| eyre!("OIDN could not filter: {err:?}"))?;
+            .map_err(|err| DenoiseError(format!("OIDN could not filter: {err:?}")))?;
         // The crate does not check the device after running the filter.
         device
             .get_error()
-            .map_err(|(err, message)| eyre!("OIDN failed: {err:?}: {message}"))
+            .map_err(|(err, message)| DenoiseError(format!("OIDN failed: {err:?}: {message}")))
     }
 }
+
+/// Why Open Image Denoise could not denoise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenoiseError(pub String);
+
+impl std::fmt::Display for DenoiseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DenoiseError {}
 
 #[cfg(test)]
 mod tests {
@@ -118,14 +134,14 @@ mod tests {
         };
         assert!(overlap > 0 && alignment > 0, "{overlap} {alignment}");
         assert!(
-            raytracer::DENOISE_HALO >= overlap as u32,
+            crate::DENOISE_HALO >= overlap as u32,
             "OIDN needs {overlap} px"
         );
         assert_eq!(
-            raytracer::DENOISE_ALIGNMENT % alignment as u32,
+            crate::DENOISE_ALIGNMENT % alignment as u32,
             0,
             "OIDN needs {alignment} px"
         );
-        assert_eq!(raytracer::DENOISE_HALO % raytracer::DENOISE_ALIGNMENT, 0);
+        assert_eq!(crate::DENOISE_HALO % crate::DENOISE_ALIGNMENT, 0);
     }
 }

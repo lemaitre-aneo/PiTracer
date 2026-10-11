@@ -10,8 +10,12 @@ use sdl2::rect::Rect;
 use std::time::{Duration, Instant};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::denoiser::DenoiseThread;
+use crate::display::Display;
 use crate::raytracer::{Control, ViewerEvent};
 
+mod denoiser;
+mod display;
 mod raytracer;
 
 #[cfg(not(miri))]
@@ -144,11 +148,29 @@ pub fn main() -> Result<(), eyre::Report> {
     let mut event_pump = sdl.event_pump().map_err(eyre::Report::msg)?;
 
     // The UI thread exclusively owns the displayed framebuffer; the render
-    // thread streams finished rows into it through the SDL event queue.
+    // thread streams finished rows into it through the SDL event queue, and
+    // the denoising thread the denoised frames.
     let width = cli.width as usize;
     let height = cli.height as usize;
     let pitch = width * 3;
-    let mut pixels = vec![0u8; pitch * height];
+    let scene = std::sync::Arc::new(scene);
+    let mut display = Display::new(scene.clone(), denoiser::AVAILABLE);
+    let denoise_thread = DenoiseThread::spawn(width, height, events.event_sender());
+    let mut paused = false;
+    let title = |paused: bool, display: &Display| {
+        let mut title = String::from("Rust Tracer");
+        if display.enabled() {
+            title.push_str(" (denoised)");
+        }
+        if paused {
+            title.push_str(" (paused)");
+        }
+        title
+    };
+    canvas
+        .window_mut()
+        .set_title(&title(paused, &display))
+        .map_err(eyre::Report::msg)?;
 
     let control = Control::new();
     let render_thread = std::thread::spawn({
@@ -174,13 +196,20 @@ pub fn main() -> Result<(), eyre::Report> {
             // Single registered custom type: extract at most once per event
             // (the payload is moved out of a raw box; never clone user events).
             match event.as_user_event_type::<ViewerEvent>() {
-                Some(ViewerEvent::Row { y, pixels: row }) => {
-                    pixels[y * pitch..(y + 1) * pitch].copy_from_slice(&row);
+                Some(ViewerEvent::Row { y, radiance }) => {
+                    display.row(y, &radiance);
                     dirty = true;
                     continue;
                 }
-                Some(ViewerEvent::IterationDone { iter }) => {
+                Some(ViewerEvent::IterationDone { iter, snapshot }) => {
                     tracing::debug!("iteration #{iter}: displayed");
+                    if let Some(request) = display.frame_done(iter, snapshot) {
+                        denoise_thread.request(request);
+                    }
+                    continue;
+                }
+                Some(ViewerEvent::Denoised(denoised)) => {
+                    dirty |= display.denoised(denoised);
                     continue;
                 }
                 None => {}
@@ -209,17 +238,30 @@ pub fn main() -> Result<(), eyre::Report> {
                     keycode: Some(Keycode::Space),
                     ..
                 } => {
-                    let title = if control.toggle_pause() {
-                        tracing::info!("Paused");
-                        "Rust Tracer (paused)"
-                    } else {
-                        tracing::info!("Resumed");
-                        "Rust Tracer"
-                    };
+                    paused = control.toggle_pause();
+                    tracing::info!("{}", if paused { "Paused" } else { "Resumed" });
                     canvas
                         .window_mut()
-                        .set_title(title)
+                        .set_title(&title(paused, &display))
                         .map_err(eyre::Report::msg)?;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::D),
+                    ..
+                } => {
+                    if !denoiser::AVAILABLE {
+                        tracing::info!("noise reduction is not built in (the `denoise` feature)");
+                    }
+                    if let Some(request) = display.toggle() {
+                        denoise_thread.request(request);
+                    }
+                    let state = if display.enabled() { "on" } else { "off" };
+                    tracing::info!("noise reduction {state}");
+                    canvas
+                        .window_mut()
+                        .set_title(&title(paused, &display))
+                        .map_err(eyre::Report::msg)?;
+                    dirty = true;
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::F11),
@@ -240,7 +282,7 @@ pub fn main() -> Result<(), eyre::Report> {
 
         if dirty && last_present.elapsed() >= PRESENT_INTERVAL {
             let surface = sdl2::surface::Surface::from_data(
-                &mut pixels,
+                display.rgb(),
                 cli.width,
                 cli.height,
                 pitch as u32,
@@ -285,6 +327,7 @@ pub fn main() -> Result<(), eyre::Report> {
     render_thread
         .join()
         .map_err(|_| eyre::eyre!("render thread panicked"))?;
+    denoise_thread.stop();
 
     Ok(())
 }
