@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-raytracer = { path = "../rust-tracer-lib", package = "rust-tracer-lib" }
+raytracer = { path = "../rust-tracer-lib", package = "rust-tracer-lib", features = ["svg-text"] }
 armonik = { version = "3.29.3-beta-0", features = ["client", "serde"] }
 async-stream = "0.3"
 futures = "0.3"

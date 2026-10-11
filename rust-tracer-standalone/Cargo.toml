@@ -10,7 +10,7 @@ default = ["denoise"]
 denoise = ["raytracer/denoise"]
 
 [dependencies]
-raytracer = { path = "../rust-tracer-lib", package = "rust-tracer-lib" }
+raytracer = { path = "../rust-tracer-lib", package = "rust-tracer-lib", features = ["svg-text"] }
 sdl2 = "0.38"
 
 

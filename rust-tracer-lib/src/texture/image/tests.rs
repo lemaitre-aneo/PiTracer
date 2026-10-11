@@ -30,12 +30,12 @@ fn opacity(image: &Image, u: f32, v: f32) -> f32 {
 
 #[test]
 fn srgb_decoding_matches_the_standard() {
-    assert_eq!(srgb_to_linear(0), 0.0);
-    assert_eq!(srgb_to_linear(255), 1.0);
+    assert_eq!(srgb_to_linear(0.0), 0.0);
+    assert_eq!(srgb_to_linear(1.0), 1.0);
     // Mid grey: sRGB 188 is about 0.5 linear.
-    assert_close(srgb_to_linear(188), 0.5029, 1e-4);
+    assert_close(srgb_to_linear(188.0 / 255.0), 0.5029, 1e-4);
     // Linear segment.
-    assert_close(srgb_to_linear(10), 10.0 / 255.0 / 12.92, 1e-7);
+    assert_close(srgb_to_linear(10.0 / 255.0), 10.0 / 255.0 / 12.92, 1e-7);
 }
 
 #[test]
@@ -257,4 +257,179 @@ fn rays_seeing_through_a_surface_find_its_next_crossing() {
     .unwrap();
     let (distance, _) = object.hit(origin, direction, &mut rng(seeds()[2])).unwrap();
     assert_close(distance, 4.0, 1e-5);
+}
+
+/// Images an SVG refers to by path are read relative to the SVG file when
+/// the scene is loaded, and embedded in what travels.
+#[test]
+fn svg_image_files_are_embedded_when_loaded() {
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::create_dir(folder.path().join("art")).unwrap();
+    std::fs::write(
+        folder.path().join("art/pixel.png"),
+        png(1, 1, &[[255, 0, 0, 255]]),
+    )
+    .unwrap();
+    std::fs::write(
+        folder.path().join("art/logo.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="pixel.png"/></svg>"#,
+    )
+    .unwrap();
+    let mut image: Image = serde_json::from_str(r#"{"file": "art/logo.svg"}"#).unwrap();
+    image.load(folder.path()).unwrap();
+    assert_eq!(
+        attenuation(&image, 0.5, 0.5),
+        Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0
+        }
+    );
+
+    let json = serde_json::to_value(&image).unwrap();
+    let bytes = BASE64.decode(json["data"].as_str().unwrap()).unwrap();
+    assert!(!svg::has_external_images(&bytes));
+    // The file is not needed any more.
+    std::fs::remove_file(folder.path().join("art/pixel.png")).unwrap();
+    let received: Image = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        attenuation(&received, 0.5, 0.5),
+        Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0
+        }
+    );
+
+    // Missing, now.
+    let mut missing: Image = serde_json::from_str(r#"{"file": "art/logo.svg"}"#).unwrap();
+    assert!(matches!(
+        missing.load(folder.path()),
+        Err(ImageError::DecodeFile {
+            source: DecodeError::Svg(SvgError::Missing(_)),
+            ..
+        })
+    ));
+}
+
+#[cfg(feature = "svg-text")]
+mod text {
+    use super::*;
+
+    const FONT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/fonts/cmunvt.otf");
+
+    fn svg_text(family: &str, text: &str) -> String {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text x="5" y="80" font-family="{family}" font-size="90">{text}</text></svg>"#
+        )
+    }
+
+    /// Loads the SVG with the test font only (no system fonts, so the
+    /// result does not depend on the machine).
+    fn load(svg: &str, fonts: &[&str]) -> Result<Image, ImageError> {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("text.svg"), svg).unwrap();
+        let mut image: Image = serde_json::from_value(serde_json::json!({
+            "file": "text.svg",
+            "fonts": fonts,
+            "system_fonts": false,
+        }))
+        .unwrap();
+        image.load(folder.path()).map(|()| image)
+    }
+
+    fn coverage(image: &Image) -> f32 {
+        let n = 50;
+        let mut covered = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                let (u, v) = ((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32);
+                covered += opacity(image, u, v);
+            }
+        }
+        covered / (n * n) as f32
+    }
+
+    #[test]
+    fn text_becomes_paths_drawn_with_the_listed_fonts() {
+        let image = load(
+            &svg_text("CMU Typewriter Text Variable Width", "Hi"),
+            &[FONT],
+        )
+        .unwrap();
+        // Glyphs cover part of the canvas, not all of it.
+        let covered = coverage(&image);
+        assert!(covered > 0.05 && covered < 0.8, "{covered}");
+
+        // What travels is text-free, and decodes without fonts.
+        let json = serde_json::to_value(&image).unwrap();
+        let bytes = BASE64.decode(json["data"].as_str().unwrap()).unwrap();
+        assert!(!svg::has_text(&bytes));
+        assert!(json.get("fonts").is_none());
+        let received: Image = serde_json::from_value(json).unwrap();
+        assert_eq!(coverage(&received), covered);
+    }
+
+    #[test]
+    fn generic_families_use_the_first_listed_font() {
+        let generic = load(&svg_text("sans-serif", "Hi"), &[FONT]).unwrap();
+        let named = load(
+            &svg_text("CMU Typewriter Text Variable Width", "Hi"),
+            &[FONT],
+        )
+        .unwrap();
+        assert_eq!(coverage(&generic), coverage(&named));
+    }
+
+    #[test]
+    fn missing_fonts_are_errors() {
+        let missing = |result: Result<Image, ImageError>| match result {
+            Err(ImageError::DecodeFile {
+                source: DecodeError::Svg(SvgError::Missing(missing)),
+                ..
+            }) => missing,
+            other => panic!("{other:?}"),
+        };
+        // No font at all.
+        let fonts = missing(load(&svg_text("Nonexistent", "Hi"), &[]));
+        assert!(fonts[0].contains("Nonexistent"), "{fonts:?}");
+        // A character the font does not have.
+        let characters = missing(load(&svg_text("sans-serif", "Hi \u{6f22}"), &[FONT]));
+        assert!(
+            characters.iter().any(|m| m.contains('\u{6f22}')),
+            "{characters:?}"
+        );
+    }
+
+    #[test]
+    fn bad_font_files_are_errors() {
+        let folder = tempfile::tempdir().unwrap();
+        let bad = folder.path().join("bad.ttf");
+        std::fs::write(&bad, b"not a font").unwrap();
+        for font in [bad.to_str().unwrap(), "/nonexistent/font.ttf"] {
+            assert!(
+                matches!(
+                    load(&svg_text("sans-serif", "Hi"), &[font]),
+                    Err(ImageError::DecodeFile {
+                        source: DecodeError::Svg(SvgError::FontFile { .. }),
+                        ..
+                    })
+                ),
+                "{font}"
+            );
+        }
+    }
+}
+
+#[cfg(not(feature = "svg-text"))]
+#[test]
+fn text_needs_the_svg_text_feature() {
+    let svg =
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text>Hi</text></svg>"#;
+    assert!(matches!(
+        Image::from_bytes(svg.to_vec()),
+        Err(ImageError::Decode(DecodeError::Svg(SvgError::Unsupported(
+            _
+        ))))
+    ));
 }

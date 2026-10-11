@@ -10,6 +10,8 @@ use crate::{Color, Hit, Texture};
 use super::TextureProperty;
 
 mod svg;
+#[cfg(feature = "svg-text")]
+mod text;
 
 use svg::Svg;
 pub use svg::SvgError;
@@ -19,16 +21,32 @@ mod definition {
 
     use serde::{Deserialize, Serialize};
 
-    /// `file` is what scene files use; `data` (base64 of the encoded file) is
-    /// what the scene carries once loaded, so that it travels to ArmoniK
-    /// workers inside the scene JSON.
-    #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+    /// `file` (with `fonts` and `system_fonts` for SVG text) is what scene
+    /// files use; `data` (base64 of the encoded file, text turned into
+    /// paths) is what the scene carries once loaded, so that it travels to
+    /// ArmoniK workers inside the scene JSON.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(default)]
     pub(super) struct Image {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub file: Option<PathBuf>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub fonts: Vec<PathBuf>,
+        #[serde(skip_serializing_if = "std::clone::Clone::clone")]
+        pub system_fonts: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub data: Option<String>,
+    }
+
+    impl Default for Image {
+        fn default() -> Self {
+            Self {
+                file: None,
+                fonts: Vec::new(),
+                system_fonts: true,
+                data: None,
+            }
+        }
     }
 }
 
@@ -47,20 +65,65 @@ mod definition {
 /// makes the surface transparent: a ray crosses it where the image is
 /// transparent, with probability `1 - alpha` (see [`Texture::opacity`]).
 ///
+/// Text in an SVG needs the `svg-text` feature: it is laid out with the
+/// font files of `fonts` (relative to the scene file) and, unless
+/// `system_fonts` is false, the system's fonts; generic families
+/// (`sans-serif`, ...) resolve to the first listed font. A font or character
+/// no font provides is an error.
+///
 /// The image is read by [`Image::load`] (through
 /// [`crate::SceneDefinition::load_textures`]), and carried by the scene from
-/// then on. Until loaded, the surface is black and opaque.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+/// then on, its text turned into paths. Until loaded, the surface is black
+/// and opaque.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "definition::Image", into = "definition::Image")]
 pub struct Image {
     file: Option<PathBuf>,
+    fonts: Vec<PathBuf>,
+    system_fonts: bool,
     data: Option<Arc<Encoded>>,
+}
+
+impl Default for Image {
+    fn default() -> Self {
+        Self {
+            file: None,
+            fonts: Vec::new(),
+            system_fonts: true,
+            data: None,
+        }
+    }
 }
 
 /// An image file and its decoded picture.
 struct Encoded {
+    /// For an SVG, text has been turned into paths.
     bytes: Vec<u8>,
     picture: Picture,
+}
+
+impl Encoded {
+    /// An SVG is first made self-contained (text turned into paths, image
+    /// files embedded) with its `sources`.
+    fn decode(bytes: Vec<u8>, sources: &svg::Sources) -> Result<Self, DecodeError> {
+        if ::image::guess_format(&bytes).is_ok() {
+            let texels = Texels::decode(&bytes).map_err(DecodeError::Raster)?;
+            return Ok(Self {
+                bytes,
+                picture: Picture::Raster(texels),
+            });
+        }
+        let bytes = if svg::has_text(&bytes) || svg::has_external_images(&bytes) {
+            svg::self_contained(&bytes, sources).map_err(DecodeError::Svg)?
+        } else {
+            bytes
+        };
+        let svg = Svg::parse(&bytes).map_err(DecodeError::Svg)?;
+        Ok(Self {
+            bytes,
+            picture: Picture::Vector(svg),
+        })
+    }
 }
 
 /// The picture is decoded from the bytes.
@@ -85,18 +148,6 @@ enum Picture {
 }
 
 impl Picture {
-    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        if ::image::guess_format(bytes).is_ok() {
-            Texels::decode(bytes)
-                .map(Picture::Raster)
-                .map_err(DecodeError::Raster)
-        } else {
-            Svg::parse(bytes)
-                .map(Picture::Vector)
-                .map_err(DecodeError::Svg)
-        }
-    }
-
     /// Linear color premultiplied by alpha, and alpha.
     fn sample(&self, u: f32, v: f32) -> ([f32; 3], f32) {
         match self {
@@ -131,9 +182,8 @@ struct Texels {
     transparent: bool,
 }
 
-/// sRGB-encoded byte to linear value (IEC 61966-2-1).
-fn srgb_to_linear(byte: u8) -> f32 {
-    let c = f32::from(byte) / 255.0;
+/// sRGB-encoded value to linear value, in [0, 1] (IEC 61966-2-1).
+fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
     } else {
@@ -142,7 +192,7 @@ fn srgb_to_linear(byte: u8) -> f32 {
 }
 
 static SRGB_TO_LINEAR: std::sync::LazyLock<[f32; 256]> =
-    std::sync::LazyLock::new(|| std::array::from_fn(|i| srgb_to_linear(i as u8)));
+    std::sync::LazyLock::new(|| std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0)));
 
 impl Texels {
     fn decode(bytes: &[u8]) -> Result<Self, ::image::ImageError> {
@@ -161,14 +211,32 @@ impl Texels {
     /// Bilinear sample at `(u, v)`: linear color premultiplied by alpha, and
     /// alpha.
     fn sample(&self, u: f32, v: f32) -> ([f32; 3], f32) {
-        // Texel centers sit at (i + 0.5) / size; clamp to the edge texels.
-        let x = (u * self.width as f32 - 0.5).clamp(0.0, (self.width - 1) as f32);
-        let y = ((1.0 - v) * self.height as f32 - 0.5).clamp(0.0, (self.height - 1) as f32);
+        let lut = &*SRGB_TO_LINEAR;
+        self.filter(
+            u * self.width as f32,
+            (1.0 - v) * self.height as f32,
+            true,
+            |byte| lut[byte as usize],
+        )
+    }
+
+    /// Sample at texel coordinates `(x, y)` (x right, y down, texel i
+    /// covering [i, i + 1)), bilinear if `smooth` and nearest otherwise,
+    /// clamped to the edge texels: color premultiplied by alpha (each byte
+    /// mapped by `channel`), and alpha.
+    fn filter(&self, x: f32, y: f32, smooth: bool, channel: impl Fn(u8) -> f32) -> ([f32; 3], f32) {
+        // Texel centers sit at i + 0.5.
+        let (x, y) = if smooth {
+            (x - 0.5, y - 0.5)
+        } else {
+            (x.floor(), y.floor())
+        };
+        let x = x.clamp(0.0, (self.width - 1) as f32);
+        let y = y.clamp(0.0, (self.height - 1) as f32);
         // Also maps NaN coordinates to texel 0.
         let (x0, y0) = (x as usize, y as usize);
         let (fx, fy) = (x - x0 as f32, y - y0 as f32);
         let (x1, y1) = ((x0 + 1).min(self.width - 1), (y0 + 1).min(self.height - 1));
-        let lut = &*SRGB_TO_LINEAR;
         let mut color = [0f32; 3];
         let mut alpha = 0f32;
         for (x, y, weight) in [
@@ -179,8 +247,8 @@ impl Texels {
         ] {
             let texel = self.rgba[y * self.width + x];
             let a = f32::from(texel[3]) / 255.0 * weight;
-            for (channel, &byte) in color.iter_mut().zip(&texel[..3]) {
-                *channel += lut[byte as usize] * a;
+            for (value, &byte) in color.iter_mut().zip(&texel[..3]) {
+                *value += channel(byte) * a;
             }
             alpha += a;
         }
@@ -189,12 +257,18 @@ impl Texels {
 }
 
 impl Image {
-    /// An image from the bytes of an image file.
+    /// An image from the bytes of an image file (SVG text uses the system's
+    /// fonts, and SVG images referring to files are errors).
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ImageError> {
-        let picture = Picture::decode(&bytes).map_err(ImageError::Decode)?;
+        let sources = svg::Sources {
+            folder: None,
+            fonts: &[],
+            system_fonts: true,
+        };
+        let encoded = Encoded::decode(bytes, &sources).map_err(ImageError::Decode)?;
         Ok(Self {
-            file: None,
-            data: Some(Arc::new(Encoded { bytes, picture })),
+            data: Some(Arc::new(encoded)),
+            ..Self::default()
         })
     }
 
@@ -210,9 +284,18 @@ impl Image {
             path: path.clone(),
             source,
         })?;
-        let picture =
-            Picture::decode(&bytes).map_err(|source| ImageError::DecodeFile { path, source })?;
-        self.data = Some(Arc::new(Encoded { bytes, picture }));
+        let fonts: Vec<PathBuf> = self.fonts.iter().map(|font| base.join(font)).collect();
+        let sources = svg::Sources {
+            folder: path.parent(),
+            fonts: &fonts,
+            system_fonts: self.system_fonts,
+        };
+        let encoded =
+            Encoded::decode(bytes, &sources).map_err(|source| ImageError::DecodeFile {
+                path: path.clone(),
+                source,
+            })?;
+        self.data = Some(Arc::new(encoded));
         Ok(())
     }
 
@@ -266,19 +349,19 @@ impl TryFrom<definition::Image> for Image {
     type Error = ImageError;
 
     fn try_from(value: definition::Image) -> Result<Self, Self::Error> {
-        match value.data {
+        let data = match value.data {
             Some(data) => {
                 let bytes = BASE64.decode(data).map_err(ImageError::Base64)?;
-                Ok(Self {
-                    file: value.file,
-                    ..Self::from_bytes(bytes)?
-                })
+                Self::from_bytes(bytes)?.data
             }
-            None => Ok(Self {
-                file: value.file,
-                data: None,
-            }),
-        }
+            None => None,
+        };
+        Ok(Self {
+            file: value.file,
+            fonts: value.fonts,
+            system_fonts: value.system_fonts,
+            data,
+        })
     }
 }
 
@@ -287,11 +370,13 @@ impl From<Image> for definition::Image {
         match value.data {
             // Loaded: the data travels, the path would not resolve elsewhere.
             Some(data) => Self {
-                file: None,
                 data: Some(BASE64.encode(&data.bytes)),
+                ..Self::default()
             },
             None => Self {
                 file: value.file,
+                fonts: value.fonts,
+                system_fonts: value.system_fonts,
                 data: None,
             },
         }
