@@ -20,6 +20,7 @@ use raytracer::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::*;
+use crate::pool::PoolConfig;
 use crate::watcher::{EventsWatcher, PollingWatcher};
 
 /// What the fake's tasks do.
@@ -52,6 +53,9 @@ struct Fake {
     submitted_options: Mutex<Vec<Option<TaskOptions>>>,
     /// Result status changes: (session, result, status).
     events: broadcast::Sender<(String, String, ResultStatus)>,
+    /// Downloads of final (denoised) display images still to fail
+    /// (UNAVAILABLE) before they work: the run cannot end without them.
+    failing_downloads: std::sync::atomic::AtomicUsize,
 }
 
 impl Fake {
@@ -63,6 +67,7 @@ impl Fake {
             calls: Mutex::default(),
             submitted_options: Mutex::default(),
             events: broadcast::channel(4096).0,
+            failing_downloads: Default::default(),
         })
     }
 
@@ -432,6 +437,18 @@ impl ResultsService for Fake {
         > + Send,
         tonic::Status,
     > {
+        use std::sync::atomic::Ordering;
+        let name = self.results.lock().unwrap()[&request.result_id]
+            .name
+            .clone();
+        let failing = name.starts_with(raytracer::DENOISED_DISPLAY_NAME)
+            && self
+                .failing_downloads
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok();
+        if failing {
+            return Err(tonic::Status::unavailable("fake ingress busy"));
+        }
         let data = self.data(&request.result_id);
         // Two chunks, to exercise the reassembly.
         let (head, tail) = data.split_at(data.len() / 2);
@@ -527,9 +544,13 @@ struct TransportCli {
     transport: crate::transport::Transport,
 }
 
-/// Serves `fake` and connects a client to it through the command-line
+/// Serves `fake`, and a pool of connections to it through the command-line
 /// transport options.
-async fn serve(fake: Arc<Fake>) -> Client {
+async fn serve(fake: Arc<Fake>) -> Arc<Pool> {
+    serve_with(fake, PoolConfig::default()).await
+}
+
+async fn serve_with(fake: Arc<Fake>, pool: PoolConfig) -> Arc<Pool> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(
@@ -552,9 +573,7 @@ async fn serve(fake: Arc<Fake>) -> Client {
         "5s",
     ])
     .unwrap();
-    Client::with_config(cli.transport.config().unwrap())
-        .await
-        .unwrap()
+    Arc::new(Pool::new(cli.transport.config().unwrap(), pool))
 }
 
 fn scene_bytes() -> Vec<u8> {
@@ -628,13 +647,26 @@ async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 async fn renders_every_block(watcher: &dyn ResultWatcher, denoise: bool) {
+    renders_every_block_through(watcher, denoise, 0, PoolConfig::default()).await;
+}
+
+/// The first `failing_downloads` downloads of final images fail
+/// (transiently), and the connections are pooled as `pool` says.
+async fn renders_every_block_through(
+    watcher: &dyn ResultWatcher,
+    denoise: bool,
+    failing_downloads: usize,
+    pool: PoolConfig,
+) {
     let fake = Fake::new(Behavior::Render);
-    let client = serve(fake.clone()).await;
+    fake.failing_downloads
+        .store(failing_downloads, std::sync::atomic::Ordering::Relaxed);
+    let pool = serve_with(fake.clone(), pool).await;
     let job = RenderJob { denoise, ..job() };
     let (events, mut received) = mpsc::unbounded_channel();
     let (_commands, mut commands) = mpsc::unbounded_channel();
 
-    let end = within(run(&client, &job, watcher, SEED, &events, &mut commands)).await;
+    let end = within(run(&pool, &job, watcher, SEED, &events, &mut commands)).await;
     assert_eq!(end, RunEnd::Ended);
 
     let received = drain(&mut received);
@@ -707,6 +739,12 @@ async fn renders_every_block(watcher: &dyn ResultWatcher, denoise: bool) {
     ));
 
     assert_eq!(fake.calls(), ["create", "close", "purge", "delete"]);
+    // Every injected failure was hit, and recovered from.
+    assert_eq!(
+        fake.failing_downloads
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
     let options = fake.submitted_options.lock().unwrap();
     let (rendering, denoising): (Vec<_>, Vec<_>) = options
         .iter()
@@ -757,11 +795,84 @@ async fn denoises_every_block_with_polling() {
     .await;
 }
 
-/// Blocks still refining show their intermediate images.
+/// Connections spent after two requests, at most two of them at a time
+/// (one held by the events subscription), multiplexed or not: the run goes
+/// through many reconnections and waits for connections, unharmed.
+#[tokio::test]
+async fn runs_survive_connection_recycling() {
+    for multiplex in [false, true] {
+        let pool = PoolConfig {
+            pool_size: Some(2),
+            requests_per_connection: Some(2),
+            multiplex,
+        };
+        renders_every_block_through(&EventsWatcher, true, 0, pool).await;
+    }
+}
+
+/// A run survives transient download failures of its final images.
+#[tokio::test]
+async fn runs_survive_failed_downloads() {
+    renders_every_block_through(
+        &EventsWatcher,
+        true,
+        DOWNLOAD_ATTEMPTS as usize - 1,
+        PoolConfig::default(),
+    )
+    .await;
+}
+
+/// A download is retried until its last attempt.
+#[tokio::test]
+async fn downloads_retry_transient_failures() {
+    let fake = Fake::new(Behavior::Render);
+    let pool = serve(fake.clone()).await;
+    let image = DisplayBlock {
+        block: Block {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        samples: 4,
+        pixels: vec![[1, 2, 3]],
+    };
+    let result_id = fake
+        .add_result(
+            "session",
+            name(raytracer::DENOISED_DISPLAY_NAME, &image.block),
+            Some(image.encode()),
+        )
+        .result_id;
+    let finished = Finished::Final {
+        result_id,
+        block: image.block,
+        status: ResultStatus::Completed,
+    };
+    let set_failures = |n: u32| {
+        fake.failing_downloads
+            .store(n as usize, std::sync::atomic::Ordering::Relaxed)
+    };
+
+    set_failures(DOWNLOAD_ATTEMPTS - 1);
+    let started = std::time::Instant::now();
+    let (_, downloaded) = within(download(&pool, "session", finished.clone())).await;
+    assert_eq!(downloaded.unwrap(), image);
+    // One delay per failed attempt.
+    assert!(started.elapsed() >= Duration::from_millis(500) * (DOWNLOAD_ATTEMPTS - 1));
+
+    set_failures(DOWNLOAD_ATTEMPTS);
+    let (_, downloaded) = within(download(&pool, "session", finished)).await;
+    let error = format!("{:#}", downloaded.unwrap_err());
+    assert!(error.contains("could not download"), "{error}");
+}
+
+/// Blocks still refining show their intermediate images (whose first pass
+/// is all they get here).
 #[tokio::test]
 async fn intermediate_images_show_progress() {
     let fake = Fake::new(Behavior::Stall);
-    let client = serve(fake.clone()).await;
+    let pool = serve(fake.clone()).await;
     let job = job();
     let (events, mut received) = mpsc::unbounded_channel();
     let (sender, mut commands) = mpsc::unbounded_channel();
@@ -771,7 +882,8 @@ async fn intermediate_images_show_progress() {
         let mut first_passes = HashMap::new();
         while first_passes.len() < job.blocks.len() {
             if let Some(RunEvent::Block { image, done }) = received.recv().await {
-                assert!(!done);
+                // Intermediate, except black blocks: final after one pass.
+                assert!(!done || image.pixels.iter().all(|pixel| *pixel == [0; 3]));
                 first_passes.insert(image.block, image);
             }
         }
@@ -780,7 +892,7 @@ async fn intermediate_images_show_progress() {
     };
     let (end, first_passes) = within(async {
         tokio::join!(
-            run(&client, &job, &EventsWatcher, SEED, &events, &mut commands),
+            run(&pool, &job, &EventsWatcher, SEED, &events, &mut commands),
             watch
         )
     })
@@ -804,7 +916,7 @@ async fn intermediate_images_show_progress() {
 #[tokio::test]
 async fn aborted_result_fails_and_cancels_the_session() {
     let fake = Fake::new(Behavior::Abort);
-    let client = serve(fake.clone()).await;
+    let pool = serve(fake.clone()).await;
     let (events, mut received) = mpsc::unbounded_channel();
     let (_commands, mut commands) = mpsc::unbounded_channel();
 
@@ -813,7 +925,7 @@ async fn aborted_result_fails_and_cancels_the_session() {
         ..job()
     };
     let end = within(run(
-        &client,
+        &pool,
         &job,
         &EventsWatcher,
         SEED,
@@ -834,7 +946,7 @@ async fn aborted_result_fails_and_cancels_the_session() {
 #[tokio::test]
 async fn commands_pause_and_interrupt_the_run() {
     let fake = Fake::new(Behavior::Hang);
-    let client = serve(fake.clone()).await;
+    let pool = serve(fake.clone()).await;
     let (events, mut received) = mpsc::unbounded_channel();
     let (sender, mut commands) = mpsc::unbounded_channel();
     for command in [Command::TogglePause, Command::TogglePause, Command::Quit] {
@@ -842,7 +954,7 @@ async fn commands_pause_and_interrupt_the_run() {
     }
 
     let end = within(run(
-        &client,
+        &pool,
         &job(),
         &EventsWatcher,
         SEED,
@@ -866,11 +978,11 @@ async fn commands_pause_and_interrupt_the_run() {
 #[tokio::test]
 async fn demo_loop_reruns_until_quit() {
     let fake = Fake::new(Behavior::Render);
-    let client = serve(fake.clone()).await;
+    let pool = serve(fake.clone()).await;
     let (events, mut received) = mpsc::unbounded_channel();
     let (sender, commands) = mpsc::unbounded_channel();
     let demo = tokio::spawn(demo_loop(
-        client,
+        pool,
         job(),
         || Ok(job()),
         Box::new(EventsWatcher),
@@ -900,7 +1012,7 @@ async fn demo_loop_reruns_until_quit() {
 #[tokio::test]
 async fn demo_loop_reloads_the_scene_for_each_run() {
     let fake = Fake::new(Behavior::Render);
-    let client = serve(fake.clone()).await;
+    let pool = serve(fake.clone()).await;
     let (events, mut received) = mpsc::unbounded_channel();
     let (sender, commands) = mpsc::unbounded_channel();
     let smaller = || {
@@ -917,7 +1029,7 @@ async fn demo_loop_reloads_the_scene_for_each_run() {
     };
     let mut reloads = vec![Ok(smaller()), Err(eyre::eyre!("bad scene"))];
     let demo = tokio::spawn(demo_loop(
-        client,
+        pool,
         job(),
         move || reloads.pop().unwrap_or_else(|| Ok(job())),
         Box::new(EventsWatcher),
@@ -952,14 +1064,14 @@ async fn demo_loop_reloads_the_scene_for_each_run() {
 #[tokio::test]
 async fn events_watcher_catches_up_and_filters_by_name() {
     let fake = Fake::new(Behavior::Render);
-    let client = serve(fake.clone()).await;
+    let pool = serve(fake.clone()).await;
     fake.add_result("session", "payload-early".into(), Some(vec![1]));
     let early = fake.add_result("session", "display-early".into(), Some(vec![1]));
     fake.add_result("other", "display-other".into(), Some(vec![1]));
     let unwanted = fake.add_result("session", "linear-late".into(), None);
     let late = fake.add_result("session", "display-late".into(), None);
 
-    let mut updates = EventsWatcher.watch(client, "session".into(), "display-".into());
+    let mut updates = EventsWatcher.watch(pool, "session".into(), "display-".into());
     let first = within(updates.next()).await.unwrap();
     assert_eq!(first.result_id, early.result_id);
     assert_eq!(first.status, ResultStatus::Completed);

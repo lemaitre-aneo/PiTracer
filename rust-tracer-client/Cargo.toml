@@ -18,6 +18,9 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 mimalloc = { version = "0.1", features = ["v3"] }
 sdl2 = "0.38"
+# The connection pool's bag (from the ArmoniK load balancer)
+crossbeam-deque = "0.8"
+thread_local = "1.1"
 rand = "0.9"
 
 [dev-dependencies]

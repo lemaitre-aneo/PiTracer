@@ -1,16 +1,18 @@
 //! Waiting for results: an abstraction over the two ways ArmoniK reports
 //! result completion, so the strategy is chosen at runtime.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use armonik::client::Results;
 use armonik::events::{EventsEnum, Update};
 use armonik::results::filter::{Condition, Field as FilterField, Status};
 use armonik::{
-    Client, FilterStatusOperator, FilterString, FilterStringOperator, ResultStatus, SortDirection,
+    FilterStatusOperator, FilterString, FilterStringOperator, ResultStatus, SortDirection,
 };
 use futures::StreamExt;
 use futures::stream::BoxStream;
+
+use crate::pool::Pool;
 
 /// A result of the session reached a final status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +31,7 @@ pub trait ResultWatcher: Send + Sync {
     /// errors are logged and retried: the stream never ends on its own.
     fn watch(
         &self,
-        client: Client,
+        pool: Arc<Pool>,
         session_id: String,
         name_prefix: String,
     ) -> BoxStream<'static, ResultUpdate>;
@@ -67,34 +69,37 @@ pub struct EventsWatcher;
 impl ResultWatcher for EventsWatcher {
     fn watch(
         &self,
-        client: Client,
+        pool: Arc<Pool>,
         session_id: String,
         name_prefix: String,
     ) -> BoxStream<'static, ResultUpdate> {
         async_stream::stream! {
-            let mut events_client = client.clone().into_events();
-            let mut results = client.into_results();
             loop {
-                let events = events_client
-                    .subscribe(
-                        &session_id,
-                        Vec::<Vec<armonik::tasks::filter::Field>>::new(),
-                        [[name_filter(&name_prefix)]],
-                        [EventsEnum::ResultStatusUpdate],
-                    )
-                    .await;
-                match events {
-                    Ok(events) => {
+                // The subscription holds its pooled connection while it lasts.
+                let subscription = async {
+                    let mut events = pool.events().await?;
+                    let stream = events
+                        .subscribe(
+                            &session_id,
+                            Vec::<Vec<armonik::tasks::filter::Field>>::new(),
+                            [[name_filter(&name_prefix)]],
+                            [EventsEnum::ResultStatusUpdate],
+                        )
+                        .await?;
+                    Ok::<_, eyre::Report>((events, stream))
+                };
+                match subscription.await {
+                    Ok((_connection, events)) => {
                         // Catch up only once subscribed, so nothing finishing
                         // in between can be missed.
-                        match list_finished(&mut results, &session_id, &name_prefix).await {
+                        match list_finished(&pool, &session_id, &name_prefix).await {
                             Ok(finished) => {
                                 for update in finished {
                                     yield update;
                                 }
                             }
                             Err(err) => {
-                                tracing::warn!("could not list the finished results: {err}");
+                                tracing::warn!("could not list the finished results: {err:#}");
                                 tokio::time::sleep(RETRY_DELAY).await;
                                 continue;
                             }
@@ -113,14 +118,14 @@ impl ResultWatcher for EventsWatcher {
                                     }
                                 }
                                 Err(err) => {
-                                    tracing::warn!("event stream failed: {err}");
+                                    tracing::warn!("event stream failed: {}", crate::Chain(&err));
                                     break;
                                 }
                             }
                         }
                         tracing::warn!("event stream closed, subscribing again");
                     }
-                    Err(err) => tracing::warn!("could not subscribe to events: {err}"),
+                    Err(err) => tracing::warn!("could not subscribe to events: {err:#}"),
                 }
                 tokio::time::sleep(RETRY_DELAY).await;
             }
@@ -137,21 +142,20 @@ pub struct PollingWatcher {
 impl ResultWatcher for PollingWatcher {
     fn watch(
         &self,
-        client: Client,
+        pool: Arc<Pool>,
         session_id: String,
         name_prefix: String,
     ) -> BoxStream<'static, ResultUpdate> {
         let interval = self.interval;
         async_stream::stream! {
-            let mut results = client.into_results();
             loop {
-                match list_finished(&mut results, &session_id, &name_prefix).await {
+                match list_finished(&pool, &session_id, &name_prefix).await {
                     Ok(finished) => {
                         for update in finished {
                             yield update;
                         }
                     }
-                    Err(err) => tracing::warn!("could not list the finished results: {err}"),
+                    Err(err) => tracing::warn!("could not list the finished results: {err:#}"),
                 }
                 tokio::time::sleep(interval).await;
             }
@@ -175,12 +179,12 @@ fn name_filter(prefix: &str) -> FilterField {
 }
 
 /// All the completed or aborted results of the session named
-/// `name_prefix...`, page by page.
+/// `name_prefix...`, page by page (one pooled connection per page).
 async fn list_finished(
-    results: &mut Results<Client>,
+    pool: &Pool,
     session_id: &str,
     name_prefix: &str,
-) -> Result<Vec<ResultUpdate>, armonik::client::RequestError> {
+) -> eyre::Result<Vec<ResultUpdate>> {
     let session = FilterField {
         field: armonik::results::Field::SessionId,
         condition: Condition::String(FilterString {
@@ -208,7 +212,9 @@ async fn list_finished(
 
     let mut finished = Vec::new();
     for page in 0.. {
-        let response = results
+        let response = pool
+            .results()
+            .await?
             .list(filters.clone(), sort.clone(), page, PAGE_SIZE)
             .await?;
         let last = response.results.len() < PAGE_SIZE as usize;

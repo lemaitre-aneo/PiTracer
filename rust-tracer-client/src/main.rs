@@ -10,8 +10,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::demo::{Command, RenderJob, RunEvent};
 use crate::watcher::WatchMode;
 
+mod bag;
 mod blocks;
 mod demo;
+mod pool;
 mod transport;
 mod viewer;
 mod watcher;
@@ -108,6 +110,23 @@ pub struct Cli {
 
     #[command(flatten)]
     pub transport: transport::Transport,
+}
+
+/// Displays an error followed by its causes, `: `-separated: what went wrong
+/// with a gRPC request (its status code and message) is in the source of the
+/// `armonik` error, whose own message only says that a request failed.
+pub(crate) struct Chain<'a>(pub &'a dyn std::error::Error);
+
+impl std::fmt::Display for Chain<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(cause) = source {
+            write!(f, ": {cause}")?;
+            source = cause.source();
+        }
+        Ok(())
+    }
 }
 
 /// Delay between the end of a run and the next one, unless
@@ -220,10 +239,18 @@ fn main() -> Result<(), eyre::Report> {
     let (width, height, samples) = (first.width, first.height, first.samples);
 
     let runtime = tokio::runtime::Runtime::new()?;
-    // Connect before opening the window, so a bad endpoint fails right away.
-    let client = runtime
-        .block_on(armonik::Client::with_config(cli.transport.config()?))
-        .wrap_err("could not connect to ArmoniK")?;
+    // Connect before opening the window, so a bad endpoint fails right away
+    // (the connection then goes back to the pool for the first requests).
+    let config = cli.transport.config()?;
+    let pool = runtime.block_on(async {
+        let pool = std::sync::Arc::new(pool::Pool::new(config, cli.transport.pool_config()));
+        drop(
+            pool.client()
+                .await
+                .wrap_err("could not connect to ArmoniK")?,
+        );
+        Ok::<_, eyre::Report>(pool)
+    })?;
 
     let sdl = sdl2::init().map_err(eyre::Report::msg)?;
     let sdl_events = sdl.event().map_err(eyre::Report::msg)?;
@@ -247,7 +274,7 @@ fn main() -> Result<(), eyre::Report> {
             });
             let reload = move || job(&cli);
             demo::demo_loop(
-                client,
+                pool,
                 first,
                 reload,
                 watcher,
@@ -278,6 +305,18 @@ fn main() -> Result<(), eyre::Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chains_show_the_causes() {
+        let status = armonik::reexports::tonic::Status::unavailable("ingress busy");
+        let io = std::io::Error::other(status);
+        let shown = Chain(&io).to_string();
+        assert!(shown.contains("ingress busy"), "{shown}");
+        assert_eq!(
+            Chain(&std::fmt::Error).to_string(),
+            std::fmt::Error.to_string()
+        );
+    }
 
     const SCENE: &str = "
 camera:

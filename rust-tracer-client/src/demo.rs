@@ -5,9 +5,10 @@
 //! waits for.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
-use armonik::{Client, ResultStatus, TaskOptions};
+use armonik::{ResultStatus, TaskOptions};
 use eyre::{Context, OptionExt, bail, ensure};
 use futures::stream::FuturesUnordered;
 use futures::{StreamExt, TryStreamExt};
@@ -19,6 +20,7 @@ use raytracer::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::pool::Pool;
 use crate::watcher::{ResultUpdate, ResultWatcher};
 
 /// Everything a run needs.
@@ -100,7 +102,7 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// one ends (or only on [`Command::Rerun`] without a delay). Every run after
 /// the first renders `reload()`, or the previous job again if it fails.
 pub async fn demo_loop(
-    client: Client,
+    pool: Arc<Pool>,
     mut job: RenderJob,
     mut reload: impl FnMut() -> eyre::Result<RenderJob> + Send,
     watcher: Box<dyn ResultWatcher>,
@@ -110,7 +112,7 @@ pub async fn demo_loop(
 ) {
     loop {
         match run(
-            &client,
+            &pool,
             &job,
             &*watcher,
             rand::random(),
@@ -175,22 +177,25 @@ async fn wait_for_rerun(
 /// One run, in its own session, which it cleans up whatever happens: a
 /// failure is reported (log and [`RunEvent::Finished`]), not returned.
 pub async fn run(
-    client: &Client,
+    pool: &Arc<Pool>,
     job: &RenderJob,
     watcher: &dyn ResultWatcher,
     seed: u64,
     events: &UnboundedSender<RunEvent>,
     commands: &mut UnboundedReceiver<Command>,
 ) -> RunEnd {
-    let session_id = match client
-        .clone()
-        .into_sessions()
-        .create(job.partitions.clone(), job.task_options.clone())
-        .await
-    {
+    let session = async {
+        let session_id = pool
+            .sessions()
+            .await?
+            .create(job.partitions.clone(), job.task_options.clone())
+            .await?;
+        Ok::<_, eyre::Report>(session_id)
+    };
+    let session_id = match session.await {
         Ok(session_id) => session_id,
         Err(err) => {
-            let error = format!("could not create a session: {err}");
+            let error = format!("could not create a session: {err:#}");
             tracing::error!("{error}");
             _ = events.send(RunEvent::Finished { error: Some(error) });
             return RunEnd::Ended;
@@ -207,7 +212,7 @@ pub async fn run(
     // Scoped so the render (its watcher and downloads) is dropped before the
     // session is torn down.
     let outcome = {
-        let render = render(client, &session_id, job, watcher, seed, events);
+        let render = render(pool, &session_id, job, watcher, seed, events);
         let mut render = std::pin::pin!(render);
         let mut paused = false;
         loop {
@@ -216,7 +221,7 @@ pub async fn run(
                 command = commands.recv() => match command {
                     Some(Command::TogglePause) => {
                         paused = !paused;
-                        toggle_pause(client, &session_id, paused).await;
+                        toggle_pause(pool, &session_id, paused).await;
                     }
                     Some(command) => break Ok(RunEnd::Interrupted(command)),
                     None => break Ok(RunEnd::Interrupted(Command::Quit)),
@@ -233,7 +238,7 @@ pub async fn run(
             Some(format!("{err}"))
         }
     };
-    if tokio::time::timeout(CLEANUP_TIMEOUT, cleanup(client, &session_id, completed))
+    if tokio::time::timeout(CLEANUP_TIMEOUT, cleanup(pool, &session_id, completed))
         .await
         .is_err()
     {
@@ -245,36 +250,43 @@ pub async fn run(
     outcome.unwrap_or(RunEnd::Ended)
 }
 
-async fn toggle_pause(client: &Client, session_id: &str, pause: bool) {
-    let mut sessions = client.clone().into_sessions();
-    let result = if pause {
-        sessions.pause(session_id).await
-    } else {
-        sessions.resume(session_id).await
+async fn toggle_pause(pool: &Pool, session_id: &str, pause: bool) {
+    let result = async {
+        let mut sessions = pool.sessions().await?;
+        if pause {
+            sessions.pause(session_id).await?;
+        } else {
+            sessions.resume(session_id).await?;
+        }
+        Ok::<_, eyre::Report>(())
     };
-    match result {
-        Ok(_) => tracing::info!(session_id, "{}", if pause { "paused" } else { "resumed" }),
-        Err(err) => tracing::warn!(session_id, "could not pause or resume: {err}"),
+    match result.await {
+        Ok(()) => tracing::info!(session_id, "{}", if pause { "paused" } else { "resumed" }),
+        Err(err) => tracing::warn!(session_id, "could not pause or resume: {err:#}"),
     }
 }
 
 /// Closes a completed session, cancels an abandoned one, then purges and
 /// deletes it (its results are no longer needed).
-async fn cleanup(client: &Client, session_id: &str, completed: bool) {
-    let mut sessions = client.clone().into_sessions();
-    let first = if completed {
-        sessions.close(session_id).await
-    } else {
-        sessions.cancel(session_id).await
-    };
-    let steps = [
-        (if completed { "close" } else { "cancel" }, first),
-        ("purge", sessions.purge(session_id).await),
-        ("delete", sessions.delete(session_id).await),
-    ];
-    for (step, result) in steps {
-        if let Err(err) = result {
-            tracing::warn!(session_id, "could not {step} the session: {err}");
+async fn cleanup(pool: &Pool, session_id: &str, completed: bool) {
+    for step in [
+        if completed { "close" } else { "cancel" },
+        "purge",
+        "delete",
+    ] {
+        // One pooled connection per request.
+        let result = async {
+            let mut sessions = pool.sessions().await?;
+            match step {
+                "close" => sessions.close(session_id).await?,
+                "cancel" => sessions.cancel(session_id).await?,
+                "purge" => sessions.purge(session_id).await?,
+                _ => sessions.delete(session_id).await?,
+            };
+            Ok::<_, eyre::Report>(())
+        };
+        if let Err(err) = result.await {
+            tracing::warn!(session_id, "could not {step} the session: {err:#}");
         }
     }
 }
@@ -283,7 +295,7 @@ async fn cleanup(client: &Client, session_id: &str, completed: bool) {
 /// block is final. Submission and downloads overlap, so the first blocks
 /// show up while later ones are still being submitted.
 async fn render(
-    client: &Client,
+    pool: &Arc<Pool>,
     session_id: &str,
     job: &RenderJob,
     watcher: &dyn ResultWatcher,
@@ -291,12 +303,12 @@ async fn render(
     events: &UnboundedSender<RunEvent>,
 ) -> eyre::Result<()> {
     let (submitted, mut submissions) = tokio::sync::mpsc::unbounded_channel();
-    let submit = async move { submit(client, session_id, job, seed, submitted).await };
+    let submit = async move { submit(pool, session_id, job, seed, submitted).await };
     let collect = async {
         let total = job.blocks.len();
         let blocks: HashSet<Block> = job.blocks.iter().copied().collect();
         let mut updates = watcher.watch(
-            client.clone(),
+            pool.clone(),
             session_id.to_owned(),
             format!("{DISPLAY_NAME}-"),
         );
@@ -312,7 +324,7 @@ async fn render(
             while downloads.len() < DOWNLOADS
                 && let Some(finished) = queued.pop_front()
             {
-                downloads.push(download(client, session_id, finished));
+                downloads.push(download(pool, session_id, finished));
             }
             let finished = tokio::select! {
                 submission = submissions.recv(), if submitting => match submission {
@@ -374,16 +386,17 @@ async fn render(
 /// Uploads the scene and submits the first pass of each block, sending each
 /// block's final display result id to `submitted` once submitted.
 async fn submit(
-    client: &Client,
+    pool: &Pool,
     session_id: &str,
     job: &RenderJob,
     seed: u64,
     submitted: UnboundedSender<(String, Block)>,
 ) -> eyre::Result<()> {
-    let mut results = client.clone().into_results();
-    let mut tasks = client.clone().into_tasks();
+    // One pooled connection per request.
 
-    let scene_id = results
+    let scene_id = pool
+        .results()
+        .await?
         .create(
             session_id,
             [armonik::results::create::RequestItem {
@@ -418,7 +431,8 @@ async fn submit(
     };
     for blocks in job.blocks.chunks(BATCH_SIZE) {
         let outputs = by_name(
-            results
+            pool.results()
+                .await?
                 .create_metadata(
                     session_id,
                     blocks.iter().flat_map(|block| {
@@ -449,7 +463,8 @@ async fn submit(
             })
             .collect::<eyre::Result<Vec<_>>>()?;
         let payload_ids = by_name(
-            results
+            pool.results()
+                .await?
                 .create(
                     session_id,
                     payloads
@@ -478,7 +493,8 @@ async fn submit(
             })
             .collect::<eyre::Result<Vec<_>>>()?;
 
-        tasks
+        pool.tasks()
+            .await?
             .submit(session_id, Some(task_options.clone()), items)
             .await
             .wrap_err("could not submit the tasks")?;
@@ -501,7 +517,8 @@ async fn submit(
     task_options.priority = DENOISE_PRIORITY;
     for blocks in job.blocks.chunks(BATCH_SIZE) {
         let outputs = by_name(
-            results
+            pool.results()
+                .await?
                 .create_metadata(
                     session_id,
                     blocks.iter().flat_map(|block| {
@@ -537,7 +554,8 @@ async fn submit(
             })
             .collect::<eyre::Result<Vec<_>>>()?;
         let payload_ids = by_name(
-            results
+            pool.results()
+                .await?
                 .create(
                     session_id,
                     payloads
@@ -567,7 +585,8 @@ async fn submit(
                 })
             })
             .collect::<eyre::Result<Vec<_>>>()?;
-        tasks
+        pool.tasks()
+            .await?
             .submit(session_id, Some(task_options.clone()), items)
             .await
             .wrap_err("could not submit the denoising tasks")?;
@@ -580,7 +599,7 @@ async fn submit(
 
 /// Downloads and decodes a display image, retrying transient errors.
 async fn download(
-    client: &Client,
+    pool: &Pool,
     session_id: &str,
     finished: Finished,
 ) -> (Finished, eyre::Result<DisplayBlock>) {
@@ -588,17 +607,15 @@ async fn download(
     let mut attempt = 1;
     let bytes = loop {
         let data = async {
-            let chunks = client
-                .clone()
-                .into_results()
-                .download(session_id, &result_id)
-                .await?;
-            chunks.try_concat().await
+            // The connection is held until the whole result is read.
+            let mut results = pool.results().await?;
+            let chunks = results.download(session_id, &result_id).await?;
+            Ok::<_, eyre::Report>(chunks.try_concat().await?)
         };
         match data.await {
             Ok(bytes) => break bytes,
             Err(err) if attempt < DOWNLOAD_ATTEMPTS => {
-                tracing::warn!("download of {result_id} failed (attempt {attempt}): {err}");
+                tracing::warn!("download of {result_id} failed (attempt {attempt}): {err:#}");
                 attempt += 1;
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }

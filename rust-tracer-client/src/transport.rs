@@ -1,7 +1,8 @@
 //! Command-line surface of the connection to the ArmoniK control plane: one
 //! flag per `armonik-transport` option, each falling back to its
-//! `GrpcClient__*` environment variable (the ArmoniK convention). Values are
-//! handed to `armonik-transport` as given, which validates them.
+//! `GrpcClient__*` environment variable (the ArmoniK convention), handed to
+//! `armonik-transport` as given, which validates them; plus the connection
+//! pool's settings (`pool.rs`).
 
 use armonik::transport::{ClientConfig, ClientConfigArgs};
 
@@ -82,9 +83,32 @@ pub struct Transport {
     /// User-Agent header of every request [default: rust-tracer-client/<version>]
     #[arg(long, env = "GrpcClient__UserAgent")]
     pub user_agent: Option<String>,
+
+    /// Maximum number of connections to the control plane [default: 4 x
+    /// tokio workers; 0: unlimited]
+    #[arg(long)]
+    pub pool_size: Option<usize>,
+
+    /// Requests sent on a connection before it is replaced, to stay below
+    /// the ingress's per-connection cap (nginx closes connections after
+    /// 1000 requests by default) [default: 800; 0: never]
+    #[arg(long)]
+    pub requests_per_connection: Option<usize>,
+
+    /// Let a connection carry several requests at once
+    #[arg(long)]
+    pub multiplex: bool,
 }
 
 impl Transport {
+    pub fn pool_config(&self) -> crate::pool::PoolConfig {
+        crate::pool::PoolConfig {
+            pool_size: self.pool_size,
+            requests_per_connection: self.requests_per_connection,
+            multiplex: self.multiplex,
+        }
+    }
+
     pub fn config(&self) -> Result<ClientConfig, armonik::transport::ConfigError> {
         let mut args = ClientConfigArgs::default();
         args.endpoint = if self.endpoint.contains("://") {
