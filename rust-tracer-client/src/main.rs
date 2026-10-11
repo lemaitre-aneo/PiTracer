@@ -4,7 +4,7 @@ use std::time::Duration;
 use armonik::TaskOptions;
 use clap::Parser;
 use eyre::{Context, ensure};
-use raytracer::{Scene, SceneDefinition, encode_scene};
+use raytracer::{Convergence, SceneDefinition, encode_scene};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::demo::{Command, RenderJob, RunEvent};
@@ -36,7 +36,8 @@ pub struct Cli {
     #[arg(short, long, default_value = "scene.yml")]
     pub scene: String,
 
-    /// Samples per pixel
+    /// Samples per pixel of each pass (one task renders one pass over its
+    /// block)
     #[arg(short = 'S', long, default_value = "0")]
     pub samples: u32,
 
@@ -73,6 +74,16 @@ pub struct Cli {
     /// Height of a task's block, in pixels
     #[arg(long, default_value = "60")]
     pub task_height: u32,
+
+    /// A block is done once the estimated mean squared error of its display
+    /// image, in 8-bit levels, is at most this
+    #[arg(long, default_value_t = Convergence::default().error_threshold)]
+    pub error_threshold: f32,
+
+    /// A block is done once it has this many samples per pixel, converged or
+    /// not
+    #[arg(long, default_value_t = Convergence::default().max_samples)]
+    pub max_samples: u32,
 
     /// How to wait for the results
     #[arg(long, value_enum, default_value_t = WatchMode::Events)]
@@ -153,12 +164,21 @@ fn main() -> Result<(), eyre::Report> {
     let poll_interval =
         Duration::try_from_secs_f64(cli.poll_interval).wrap_err("invalid --poll-interval")?;
 
+    let convergence = Convergence {
+        error_threshold: cli.error_threshold,
+        max_samples: cli.max_samples,
+    };
+    let mut options = HashMap::new();
+    convergence.to_options(&mut options);
+    // What the workers will read back, so invalid values fail here.
+    Convergence::from_options(&options).wrap_err("invalid convergence settings")?;
+
     let job = RenderJob {
         scene: encode_scene(&definition),
         blocks: blocks::tile(width, height, cli.task_width, cli.task_height),
         samples: definition.samples,
         task_options: TaskOptions {
-            options: HashMap::new(),
+            options,
             max_duration: armonik::reexports::prost_types::Duration {
                 seconds: 300,
                 nanos: 0,
@@ -170,8 +190,6 @@ fn main() -> Result<(), eyre::Report> {
         },
         partitions: cli.partition.iter().cloned().collect(),
     };
-    // Only used for its color conversion (gamma).
-    let display = Scene::from(definition);
 
     let runtime = tokio::runtime::Runtime::new()?;
     // Connect before opening the window, so a bad endpoint fails right away.
@@ -204,7 +222,13 @@ fn main() -> Result<(), eyre::Report> {
         })
     });
 
-    let shown = viewer::run(&sdl, width, height, &display, &commands);
+    let shown = viewer::run(
+        &sdl,
+        width,
+        height,
+        (definition.samples, cli.max_samples),
+        &commands,
+    );
 
     // Let the demo cancel and clean its session up before SDL goes away.
     _ = commands.send(Command::Quit);

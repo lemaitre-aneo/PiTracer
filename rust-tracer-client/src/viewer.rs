@@ -4,13 +4,12 @@
 
 use std::time::{Duration, Instant};
 
-use raytracer::Scene;
 use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
 use sdl2::rect::Rect;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::blocks::blit;
+use crate::blocks::{blit, outline_color};
 use crate::demo::{Command, RunEvent};
 
 /// Window title state.
@@ -37,12 +36,14 @@ impl Status {
 
 /// Shows the image until the window is closed (or Esc). Keys: Space pauses
 /// or resumes the session, R starts a new run, F11 toggles fullscreen.
-/// `scene` converts radiance to display colors (its gamma).
+/// Blocks still being refined are framed with a color going from blue to
+/// red as their sample count goes from `samples.0` (one pass) to `samples.1`
+/// (the cap).
 pub fn run(
     sdl: &sdl2::Sdl,
     width: u32,
     height: u32,
-    scene: &Scene,
+    samples: (u32, u32),
     commands: &UnboundedSender<Command>,
 ) -> eyre::Result<()> {
     let video = sdl.video().map_err(eyre::Report::msg)?;
@@ -83,9 +84,11 @@ pub fn run(
                         pixels.fill(0);
                         status = Status::default();
                     }
-                    RunEvent::Block(result) => blit(&mut pixels, width, &result, |color| {
-                        scene.to_u8_color(color)
-                    }),
+                    RunEvent::Block { image, done } => {
+                        let outline =
+                            (!done).then(|| outline_color(image.samples, samples.0, samples.1));
+                        blit(&mut pixels, width, &image, outline);
+                    }
                     RunEvent::Progress { done, total } => {
                         status.done = done;
                         status.total = total;

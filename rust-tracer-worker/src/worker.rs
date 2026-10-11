@@ -5,13 +5,19 @@ use armonik::client::Agent;
 use armonik::reexports::tonic::transport::{Channel, Endpoint, Uri};
 use armonik::reexports::{tokio, tonic};
 use armonik::{Output, server, worker};
-use eyre::{Context, OptionExt, bail, ensure};
+use eyre::{Context, OptionExt, ensure};
 use hyper_util::rt::TokioIo;
 use rayon::prelude::*;
 use raytracer::{
-    BlockPayload, BlockResult, Color, SCENE_ID_OPTION, Scene, decode_scene, render_block_row,
+    BlockPayload, BlockResult, Color, Convergence, DISPLAY_NAME, LINEAR_NAME, PAYLOAD_NAME,
+    SCENE_ID_OPTION, Scene, accumulate, decode_scene, name, render_block_row,
 };
 use rust_tracer_worker::task_handler::TaskHandler;
+
+/// Priority of the follow-up passes, above the client's first passes (1):
+/// blocks already started finish before new ones start, so the finished
+/// area grows from the center as a disc (the C# worker's heuristic).
+pub const FOLLOW_UP_PRIORITY: i32 = 8;
 
 pub struct Worker {
     agent: Agent<Channel>,
@@ -55,46 +61,79 @@ impl Worker {
         })
     }
 
-    /// Renders the task's block and sends it as the task's single result.
+    /// Renders one pass over the task's block and merges it into the
+    /// previous ones; sends the block's final results once done, or else
+    /// delegates them to a follow-up pass.
     async fn render_task(&self, mut handler: TaskHandler) -> eyre::Result<()> {
-        let [result_id] = handler.expected_results() else {
-            bail!(
-                "expected a single result to produce, got {}",
-                handler.expected_results().len()
-            );
-        };
-        let result_id = result_id.clone();
-        let scene = self.scene(&handler).await?;
-        let payload = BlockPayload::decode(handler.payload()).wrap_err("invalid payload")?;
-        payload
-            .validate(&scene.camera)
-            .wrap_err("invalid payload")?;
-        tracing::debug!(?payload, "rendering block");
-
-        let pixels =
-            spawn_blocking_cancellable(move |cancelled| render_block(&scene, &payload, cancelled))
-                .await??;
-
-        let result = BlockResult {
-            block: payload.block,
-            samples: payload.samples,
-            pixels,
-        };
-        handler.send_result(&result_id, result.encode()).await
-    }
-
-    /// The scene named by the task's `sceneId` option, from the cache or
-    /// else parsed from the task's data dependency.
-    async fn scene(&self, handler: &TaskHandler) -> eyre::Result<Arc<Scene>> {
         let scene_id = handler
             .task_options()
             .options
             .get(SCENE_ID_OPTION)
-            .ok_or_eyre("the sceneId task option is missing")?;
+            .ok_or_eyre("the sceneId task option is missing")?
+            .clone();
+        let scene = self.scene(&handler, &scene_id).await?;
+        let payload = BlockPayload::decode(handler.payload()).wrap_err("invalid payload")?;
+        payload
+            .validate(&scene.camera)
+            .wrap_err("invalid payload")?;
+        let mut expected = handler.expected_results().to_vec();
+        expected.sort();
+        let mut outputs = [&payload.outputs.linear, &payload.outputs.display];
+        outputs.sort();
+        ensure!(
+            expected.iter().eq(outputs),
+            "the task expects {expected:?}, but its payload names {:?} as the block's results",
+            payload.outputs
+        );
+        let convergence = Convergence::from_options(&handler.task_options().options)?;
+        let previous = match &payload.previous {
+            Some(previous) => Some(
+                BlockResult::decode(&handler.data_dependency(previous).await?)
+                    .wrap_err_with(|| format!("invalid accumulation {previous}"))?,
+            ),
+            None => None,
+        };
+
+        let pass = spawn_blocking_cancellable({
+            let (scene, payload) = (scene.clone(), payload.clone());
+            move |cancelled| render_block(&scene, &payload, cancelled)
+        })
+        .await??;
+        let accumulation = accumulate(
+            &scene,
+            previous,
+            BlockResult {
+                block: payload.block,
+                samples: payload.samples,
+                pixels: pass,
+            },
+            &convergence,
+        )?;
+        tracing::debug!(
+            block = ?payload.block,
+            samples = accumulation.result.samples,
+            error = ?accumulation.error,
+            done = accumulation.done,
+            "pass rendered"
+        );
+
+        let linear = accumulation.result.encode();
+        let display = accumulation.result.to_display(&scene).encode();
+        if accumulation.done {
+            handler.send_result(&payload.outputs.linear, linear).await?;
+            handler.send_result(&payload.outputs.display, display).await
+        } else {
+            delegate(&mut handler, &scene_id, &payload, linear, display).await
+        }
+    }
+
+    /// The scene `scene_id`, from the cache or else parsed from the task's
+    /// data dependency.
+    async fn scene(&self, handler: &TaskHandler, scene_id: &str) -> eyre::Result<Arc<Scene>> {
         // Checked even on a cache hit: a task that does not declare its
         // scene would fail on any worker that has not cached it.
         ensure!(
-            handler.data_dependencies().contains(scene_id),
+            handler.data_dependencies().iter().any(|id| id == scene_id),
             "scene {scene_id} is not a data dependency of the task"
         );
 
@@ -110,9 +149,58 @@ impl Worker {
         ));
         tracing::info!(scene_id, "changing scene");
         *self.scene.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some((scene_id.clone(), scene.clone()));
+            Some((scene_id.to_owned(), scene.clone()));
         Ok(scene)
     }
+}
+
+/// Hands the block over to a follow-up pass: creates the accumulation
+/// `linear` (the follow-up's input) and its `display` image (for the client
+/// to follow the progress), then submits the follow-up, expecting the
+/// block's final results in place of this task.
+async fn delegate(
+    handler: &mut TaskHandler,
+    scene_id: &str,
+    payload: &BlockPayload,
+    linear: Vec<u8>,
+    display: Vec<u8>,
+) -> eyre::Result<()> {
+    let block = &payload.block;
+    let linear_name = name(LINEAR_NAME, block);
+    let linear_id = handler
+        .create_results([
+            (linear_name.clone(), linear),
+            (name(DISPLAY_NAME, block), display),
+        ])
+        .await?
+        .into_iter()
+        .find(|result| result.name == linear_name)
+        .ok_or_eyre("the accumulation was not created")?
+        .result_id;
+    let next = payload.next(linear_id.clone());
+    let payload_id = handler
+        .create_results([(name(PAYLOAD_NAME, block), next.encode())])
+        .await?
+        .pop()
+        .ok_or_eyre("the follow-up payload was not created")?
+        .result_id;
+    let mut task_options = handler.task_options().clone();
+    task_options.priority = FOLLOW_UP_PRIORITY;
+    handler
+        .submit_tasks(
+            None,
+            [armonik::agent::submit_tasks::RequestItem {
+                expected_output_keys: vec![
+                    payload.outputs.linear.clone(),
+                    payload.outputs.display.clone(),
+                ],
+                data_dependencies: vec![scene_id.to_owned(), linear_id],
+                payload_id,
+                task_options: Some(task_options),
+            }],
+        )
+        .await?;
+    Ok(())
 }
 
 /// Runs `f` on the blocking thread pool. Dropping the returned future

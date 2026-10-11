@@ -1,6 +1,8 @@
 //! Rendering an image on ArmoniK, one session per run: upload the scene,
-//! submit one task per block, then download and forward each block as soon
-//! as its result completes.
+//! submit the first pass of each block, then show each block's display
+//! images as they come: the intermediate ones while its passes refine it
+//! (found by name, see `raytracer::task`), and the final one, which the run
+//! waits for.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -9,7 +11,10 @@ use armonik::{Client, ResultStatus, TaskOptions};
 use eyre::{Context, OptionExt, bail, ensure};
 use futures::stream::FuturesUnordered;
 use futures::{StreamExt, TryStreamExt};
-use raytracer::{Block, BlockPayload, BlockResult, SCENE_ID_OPTION};
+use raytracer::{
+    Block, BlockOutputs, BlockPayload, DISPLAY_NAME, DisplayBlock, FINAL_DISPLAY_NAME,
+    FINAL_LINEAR_NAME, PAYLOAD_NAME, SCENE_ID_OPTION, name,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::watcher::{ResultUpdate, ResultWatcher};
@@ -22,7 +27,8 @@ pub struct RenderJob {
     pub blocks: Vec<Block>,
     /// Samples per pixel.
     pub samples: u32,
-    /// Default options of the session's tasks.
+    /// Default options of the session's tasks, convergence settings
+    /// included.
     pub task_options: TaskOptions,
     /// Partitions the session may use (empty: the default partition).
     pub partitions: Vec<String>,
@@ -33,8 +39,9 @@ pub struct RenderJob {
 pub enum RunEvent {
     /// A new run starts: clear the image.
     Reset { session_id: String },
-    /// A block was rendered.
-    Block(BlockResult),
+    /// A display image of a block: an intermediate one, or the final one
+    /// when `done`.
+    Block { image: DisplayBlock, done: bool },
     /// `done` of the `total` blocks are displayed.
     Progress { done: usize, total: usize },
     /// The run ended; `error` tells why it did not complete.
@@ -224,9 +231,9 @@ async fn cleanup(client: &Client, session_id: &str, completed: bool) {
     }
 }
 
-/// Submits the job's tasks and forwards their results until every block is
-/// displayed. Submission and downloads overlap, so the first blocks show up
-/// while later ones are still being submitted.
+/// Submits the job's tasks and forwards the display images until every
+/// block is final. Submission and downloads overlap, so the first blocks
+/// show up while later ones are still being submitted.
 async fn render(
     client: &Client,
     session_id: &str,
@@ -239,17 +246,25 @@ async fn render(
     let submit = async move { submit(client, session_id, job, seed, submitted).await };
     let collect = async {
         let total = job.blocks.len();
-        let mut updates = watcher.watch(client.clone(), session_id.to_owned());
+        let blocks: HashSet<Block> = job.blocks.iter().copied().collect();
+        let mut updates = watcher.watch(
+            client.clone(),
+            session_id.to_owned(),
+            format!("{DISPLAY_NAME}-"),
+        );
         let mut tracker = Tracker::default();
         let mut queued = VecDeque::new();
         let mut downloads = FuturesUnordered::new();
+        // Sample count of the image shown for each block (`u32::MAX` once
+        // final), so a late download never replaces a better image.
+        let mut shown: HashMap<Block, u32> = HashMap::new();
         let mut submitting = true;
         let mut done = 0;
         while done < total {
             while downloads.len() < DOWNLOADS
-                && let Some((result_id, block)) = queued.pop_front()
+                && let Some(finished) = queued.pop_front()
             {
-                downloads.push(download(client, session_id, result_id, block));
+                downloads.push(download(client, session_id, finished));
             }
             let finished = tokio::select! {
                 submission = submissions.recv(), if submitting => match submission {
@@ -260,20 +275,45 @@ async fn render(
                     }
                 },
                 Some(update) = updates.next() => tracker.update(update),
-                Some(result) = downloads.next() => {
-                    let result = result?;
-                    done += 1;
-                    _ = events.send(RunEvent::Block(result));
-                    _ = events.send(RunEvent::Progress { done, total });
+                Some((finished, image)) = downloads.next() => {
+                    match (finished, image) {
+                        (Finished::Final { result_id, block, .. }, image) => {
+                            let image = image?;
+                            ensure!(
+                                image.block == block,
+                                "result {result_id} holds block {:?}, expected {block:?}",
+                                image.block
+                            );
+                            shown.insert(block, u32::MAX);
+                            done += 1;
+                            _ = events.send(RunEvent::Block { image, done: true });
+                            _ = events.send(RunEvent::Progress { done, total });
+                        }
+                        (Finished::Progress { result_id }, Ok(image)) => {
+                            let shown = shown.entry(image.block).or_default();
+                            if !blocks.contains(&image.block) {
+                                tracing::warn!("result {result_id} holds unknown block {:?}", image.block);
+                            } else if image.samples > *shown {
+                                *shown = image.samples;
+                                _ = events.send(RunEvent::Block { image, done: false });
+                            }
+                        }
+                        // Progress is best effort.
+                        (Finished::Progress { result_id }, Err(err)) => {
+                            tracing::warn!("skipping progress image {result_id}: {err:?}");
+                        }
+                    }
                     None
                 }
                 else => bail!("stopped waiting with {} blocks missing", total - done),
             };
             match finished {
-                Some((result_id, _, ResultStatus::Aborted)) => {
-                    bail!("result {result_id} was aborted (its task failed)")
-                }
-                Some((result_id, block, _)) => queued.push_back((result_id, block)),
+                Some(Finished::Final {
+                    result_id,
+                    status: ResultStatus::Aborted,
+                    ..
+                }) => bail!("result {result_id} was aborted (its task failed)"),
+                Some(finished) => queued.push_back(finished),
                 None => (),
             }
         }
@@ -283,8 +323,8 @@ async fn render(
     tokio::try_join!(submit, collect).map(|_| ())
 }
 
-/// Uploads the scene and submits one task per block, sending each task's
-/// result id (and block) to `submitted` once submitted.
+/// Uploads the scene and submits the first pass of each block, sending each
+/// block's final display result id to `submitted` once submitted.
 async fn submit(
     client: &Client,
     session_id: &str,
@@ -314,88 +354,97 @@ async fn submit(
         .options
         .insert(SCENE_ID_OPTION.into(), scene_id.clone());
 
+    let by_name = |raws: Vec<armonik::results::Raw>| -> HashMap<String, String> {
+        raws.into_iter()
+            .map(|raw| (raw.name, raw.result_id))
+            .collect()
+    };
+    let id = |ids: &HashMap<String, String>, prefix: &str, block: &Block| {
+        ids.get(&name(prefix, block))
+            .cloned()
+            .ok_or_else(|| eyre::eyre!("missing result {prefix} for block {block:?}"))
+    };
     for blocks in job.blocks.chunks(BATCH_SIZE) {
-        let name = |prefix: &str, block: &Block| format!("{prefix}-{}-{}", block.x, block.y);
-        let payloads = results
-            .create(
-                session_id,
-                blocks
-                    .iter()
-                    .map(|&block| armonik::results::create::RequestItem {
-                        name: name("payload", &block),
-                        data: BlockPayload {
-                            block,
-                            samples: job.samples,
-                            seed,
-                        }
-                        .encode(),
-                        ..Default::default()
+        let outputs = by_name(
+            results
+                .create_metadata(
+                    session_id,
+                    blocks.iter().flat_map(|block| {
+                        [FINAL_LINEAR_NAME, FINAL_DISPLAY_NAME].map(|prefix| {
+                            armonik::results::create_metadata::RequestItem {
+                                name: name(prefix, block),
+                                ..Default::default()
+                            }
+                        })
                     }),
-            )
-            .await
-            .wrap_err("could not upload the payloads")?;
-        let outputs = results
-            .create_metadata(
-                session_id,
-                blocks
-                    .iter()
-                    .map(|block| armonik::results::create_metadata::RequestItem {
-                        name: name("block", block),
-                        ..Default::default()
-                    }),
-            )
-            .await
-            .wrap_err("could not create the results")?;
-        let by_name = |raws: Vec<armonik::results::Raw>| -> HashMap<String, String> {
-            raws.into_iter()
-                .map(|raw| (raw.name, raw.result_id))
-                .collect()
-        };
-        let (payloads, outputs) = (by_name(payloads), by_name(outputs));
-        let items = blocks
+                )
+                .await
+                .wrap_err("could not create the results")?,
+        );
+        let payloads = blocks
             .iter()
-            .map(|block| {
-                let payload_id = payloads.get(&name("payload", block));
-                let output_id = outputs.get(&name("block", block));
-                match (payload_id, output_id) {
-                    (Some(payload_id), Some(output_id)) => {
-                        Ok((*block, payload_id.clone(), output_id.clone()))
-                    }
-                    _ => Err(eyre::eyre!("missing results for block {block:?}")),
-                }
+            .map(|&block| {
+                Ok(BlockPayload {
+                    block,
+                    samples: job.samples,
+                    seed,
+                    outputs: BlockOutputs {
+                        linear: id(&outputs, FINAL_LINEAR_NAME, &block)?,
+                        display: id(&outputs, FINAL_DISPLAY_NAME, &block)?,
+                    },
+                    previous: None,
+                })
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+        let payload_ids = by_name(
+            results
+                .create(
+                    session_id,
+                    payloads
+                        .iter()
+                        .map(|payload| armonik::results::create::RequestItem {
+                            name: name(PAYLOAD_NAME, &payload.block),
+                            data: payload.encode(),
+                            ..Default::default()
+                        }),
+                )
+                .await
+                .wrap_err("could not upload the payloads")?,
+        );
+        let items = payloads
+            .iter()
+            .map(|payload| {
+                Ok(armonik::tasks::submit::RequestItem {
+                    payload_id: id(&payload_ids, PAYLOAD_NAME, &payload.block)?,
+                    expected_output_keys: vec![
+                        payload.outputs.linear.clone(),
+                        payload.outputs.display.clone(),
+                    ],
+                    data_dependencies: vec![scene_id.clone()],
+                    task_options: None,
+                })
             })
             .collect::<eyre::Result<Vec<_>>>()?;
 
         tasks
-            .submit(
-                session_id,
-                Some(task_options.clone()),
-                items.iter().map(|(_, payload_id, output_id)| {
-                    armonik::tasks::submit::RequestItem {
-                        payload_id: payload_id.clone(),
-                        expected_output_keys: vec![output_id.clone()],
-                        data_dependencies: vec![scene_id.clone()],
-                        task_options: None,
-                    }
-                }),
-            )
+            .submit(session_id, Some(task_options.clone()), items)
             .await
             .wrap_err("could not submit the tasks")?;
-        for (block, _, output_id) in items {
+        for payload in payloads {
             // The receiver only goes away once the run is over.
-            _ = submitted.send((output_id, block));
+            _ = submitted.send((payload.outputs.display, payload.block));
         }
     }
     Ok(())
 }
 
-/// Downloads and decodes the result of `block`, retrying transient errors.
+/// Downloads and decodes a display image, retrying transient errors.
 async fn download(
     client: &Client,
     session_id: &str,
-    result_id: String,
-    block: Block,
-) -> eyre::Result<BlockResult> {
+    finished: Finished,
+) -> (Finished, eyre::Result<DisplayBlock>) {
+    let result_id = finished.result_id().to_owned();
     let mut attempt = 1;
     let bytes = loop {
         let data = async {
@@ -414,41 +463,64 @@ async fn download(
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(err) => {
-                return Err(err).wrap_err_with(|| format!("could not download {result_id}"));
+                let err = Err(err).wrap_err_with(|| format!("could not download {result_id}"));
+                return (finished, err);
             }
         }
     };
-    let result = BlockResult::decode(&bytes)
-        .wrap_err_with(|| format!("result {result_id} is not a block result"))?;
-    ensure!(
-        result.block == block,
-        "result {result_id} holds block {:?}, expected {block:?}",
-        result.block
-    );
-    Ok(result)
+    let image = DisplayBlock::decode(&bytes)
+        .wrap_err_with(|| format!("result {result_id} is not a display image"));
+    (finished, image)
 }
 
-/// Matches the stream of finished results against the results the run
-/// waits for. Either side can come first: a task may finish before the
-/// submission that created it has been recorded.
+/// A finished result worth downloading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Finished {
+    /// The final display image of `block` (completed or aborted).
+    Final {
+        result_id: String,
+        block: Block,
+        status: ResultStatus,
+    },
+    /// An intermediate display image (self-describing: block and samples).
+    Progress { result_id: String },
+}
+
+impl Finished {
+    fn result_id(&self) -> &str {
+        match self {
+            Finished::Final { result_id, .. } | Finished::Progress { result_id } => result_id,
+        }
+    }
+}
+
+/// Sorts the finished display images the watcher reports into the final
+/// ones the run waits for, which it learns from the submission, and the
+/// intermediate ones. Either side can come first: a final may finish before
+/// its submission has been recorded, so an unknown image is shown as
+/// progress but remembered, in case it turns out to be a final.
 #[derive(Debug, Default)]
 struct Tracker {
-    /// Submitted results not finished yet.
+    /// Submitted final images not finished yet.
     pending: HashMap<String, Block>,
-    /// Finished results not (yet) known to be ours: early finishes of ours,
-    /// and everything else the watcher reports (scene, payloads).
+    /// Finished images not known to be finals: intermediate ones, and early
+    /// finishes of finals.
     unclaimed: HashMap<String, ResultStatus>,
-    /// Results already reported as finished, to drop duplicates.
+    /// Finals already reported, to drop duplicates.
     claimed: HashSet<String>,
 }
 
 impl Tracker {
-    /// Records a submitted result; returns it if it already finished.
-    fn expect(&mut self, result_id: String, block: Block) -> Option<(String, Block, ResultStatus)> {
+    /// Records a submitted final; returns it if it already finished.
+    fn expect(&mut self, result_id: String, block: Block) -> Option<Finished> {
         match self.unclaimed.remove(&result_id) {
             Some(status) => {
                 self.claimed.insert(result_id.clone());
-                Some((result_id, block, status))
+                Some(Finished::Final {
+                    result_id,
+                    block,
+                    status,
+                })
             }
             None => {
                 self.pending.insert(result_id, block);
@@ -457,18 +529,22 @@ impl Tracker {
         }
     }
 
-    /// Records a finished result; returns it if it is one of ours, the first
-    /// time only.
-    fn update(&mut self, update: ResultUpdate) -> Option<(String, Block, ResultStatus)> {
+    /// Records a finished image; returns it the first time only.
+    fn update(&mut self, update: ResultUpdate) -> Option<Finished> {
         let ResultUpdate { result_id, status } = update;
         if let Some(block) = self.pending.remove(&result_id) {
             self.claimed.insert(result_id.clone());
-            Some((result_id, block, status))
-        } else {
-            if !self.claimed.contains(&result_id) {
-                self.unclaimed.insert(result_id, status);
-            }
+            Some(Finished::Final {
+                result_id,
+                block,
+                status,
+            })
+        } else if self.claimed.contains(&result_id) || self.unclaimed.contains_key(&result_id) {
             None
+        } else {
+            let completed = status == ResultStatus::Completed;
+            self.unclaimed.insert(result_id.clone(), status);
+            completed.then_some(Finished::Progress { result_id })
         }
     }
 }

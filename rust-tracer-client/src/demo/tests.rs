@@ -1,5 +1,7 @@
 //! Runs against an in-process fake of the ArmoniK control plane, whose
-//! tasks render their block with the lib like rust-tracer-worker does.
+//! tasks follow the iterative protocol of rust-tracer-worker (through the
+//! same lib functions): passes accumulate, intermediate display images are
+//! published, and the block's final results come last.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -9,9 +11,12 @@ use armonik::reexports::tokio_stream::wrappers::TcpListenerStream;
 use armonik::reexports::tonic;
 use armonik::results::filter::Condition;
 use armonik::server::{RequestContext, ResultsService, SessionsService, TasksService};
-use armonik::{events, results, sessions, tasks};
+use armonik::{FilterStringOperator, events, results, sessions, tasks};
 use clap::Parser;
-use raytracer::{Scene, decode_scene, encode_scene, render_block_row};
+use raytracer::{
+    BlockResult, Convergence, LINEAR_NAME, Scene, accumulate, decode_scene, encode_scene,
+    render_block_row,
+};
 use tokio::sync::{broadcast, mpsc};
 
 use super::*;
@@ -20,7 +25,10 @@ use crate::watcher::{EventsWatcher, PollingWatcher};
 /// What the fake's tasks do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Behavior {
+    /// Follow the protocol to the end.
     Render,
+    /// Render the first pass, publish it, then never finish.
+    Stall,
     Abort,
     /// Never finish.
     Hang,
@@ -120,28 +128,91 @@ impl Fake {
             .unwrap()
     }
 
-    /// Runs one task the way rust-tracer-worker does.
-    fn execute(&self, options: &TaskOptions, task: &tasks::submit::RequestItem) {
-        let output = &task.expected_output_keys[0];
+    /// Whether result `id` passes `filters`: session id, name prefix and
+    /// status, the filters the watchers use. No filter matches everything.
+    fn matches(&self, filters: &results::filter::Or, id: &str) -> bool {
+        let results = self.results.lock().unwrap();
+        let Some(result) = results.get(id) else {
+            return false;
+        };
+        let matches = |field: &results::filter::Field| match (&field.field, &field.condition) {
+            (results::Field::SessionId, Condition::String(filter)) => {
+                filter.value == result.session_id
+            }
+            (results::Field::Name, Condition::String(filter)) => match filter.operator {
+                FilterStringOperator::Equal => result.name == filter.value,
+                FilterStringOperator::StartsWith => result.name.starts_with(&filter.value),
+                ref operator => panic!("unsupported name operator {operator:?}"),
+            },
+            (results::Field::Status, Condition::Status(filter)) => filter.value == result.status,
+            filter => panic!("unsupported filter {filter:?}"),
+        };
+        filters.or.is_empty() || filters.or.iter().any(|and| and.and.iter().all(matches))
+    }
+
+    /// Runs one block's chain of tasks the way rust-tracer-worker does,
+    /// passes inline instead of as submitted follow-ups.
+    fn execute(&self, session_id: &str, options: &TaskOptions, task: &tasks::submit::RequestItem) {
         match self.behavior {
             Behavior::Hang => (),
-            Behavior::Abort => self.finish(output, ResultStatus::Aborted, None),
-            Behavior::Render => {
+            Behavior::Abort => {
+                for output in &task.expected_output_keys {
+                    self.finish(output, ResultStatus::Aborted, None);
+                }
+            }
+            Behavior::Render | Behavior::Stall => {
                 let scene_id = &options.options[SCENE_ID_OPTION];
                 assert!(task.data_dependencies.contains(scene_id));
                 let scene = Scene::from(decode_scene(&self.data(scene_id)).unwrap());
-                let payload = BlockPayload::decode(&self.data(&task.payload_id)).unwrap();
+                let convergence = Convergence::from_options(&options.options).unwrap();
+                let mut payload = BlockPayload::decode(&self.data(&task.payload_id)).unwrap();
                 payload.validate(&scene.camera).unwrap();
-                let result = BlockResult {
-                    block: payload.block,
-                    samples: payload.samples,
-                    pixels: (0..payload.block.height)
-                        .flat_map(|row| render_block_row(&scene, &payload, row))
-                        .collect(),
-                };
-                self.finish(output, ResultStatus::Completed, Some(result.encode()));
+                assert_eq!(
+                    task.expected_output_keys,
+                    [
+                        payload.outputs.linear.clone(),
+                        payload.outputs.display.clone()
+                    ]
+                );
+                loop {
+                    let previous = payload
+                        .previous
+                        .as_ref()
+                        .map(|id| BlockResult::decode(&self.data(id)).unwrap());
+                    let accumulation =
+                        accumulate(&scene, previous, render(&scene, &payload), &convergence)
+                            .unwrap();
+                    let linear = accumulation.result.encode();
+                    let display = accumulation.result.to_display(&scene).encode();
+                    if accumulation.done {
+                        let outputs = &payload.outputs;
+                        self.finish(&outputs.linear, ResultStatus::Completed, Some(linear));
+                        self.finish(&outputs.display, ResultStatus::Completed, Some(display));
+                        return;
+                    }
+                    let block = &payload.block;
+                    let linear_id = self
+                        .add_result(session_id, name(LINEAR_NAME, block), Some(linear))
+                        .result_id;
+                    self.add_result(session_id, name(DISPLAY_NAME, block), Some(display));
+                    if self.behavior == Behavior::Stall {
+                        return;
+                    }
+                    payload = payload.next(linear_id);
+                }
             }
         }
+    }
+}
+
+/// One pass, as the worker renders it.
+fn render(scene: &Scene, payload: &BlockPayload) -> BlockResult {
+    BlockResult {
+        block: payload.block,
+        samples: payload.samples,
+        pixels: (0..payload.block.height)
+            .flat_map(|row| render_block_row(scene, payload, row))
+            .collect(),
     }
 }
 
@@ -202,42 +273,24 @@ impl ResultsService for Fake {
         results::get_service_configuration,
     );
 
-    /// Supports the filters the watchers use: session id and status
-    /// equality.
     async fn list(
         self: Arc<Self>,
         request: results::list::Request,
         _context: RequestContext,
     ) -> Result<results::list::Response, tonic::Status> {
-        let matches = |id: &str, result: &FakeResult, field: &results::filter::Field| match (
-            &field.field,
-            &field.condition,
-        ) {
-            (results::Field::SessionId, Condition::String(filter)) => {
-                filter.value == result.session_id
-            }
-            (results::Field::Status, Condition::Status(filter)) => filter.value == result.status,
-            (results::Field::ResultId, Condition::String(filter)) => filter.value == id,
-            filter => panic!("unsupported filter {filter:?}"),
-        };
-        let mut found: Vec<_> = self
-            .results
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(id, result)| {
-                request
-                    .filters
-                    .or
-                    .iter()
-                    .any(|and| and.and.iter().all(|field| matches(id, result, field)))
-            })
-            .map(|(id, result)| results::Raw {
-                session_id: result.session_id.clone(),
-                name: result.name.clone(),
-                status: result.status.clone(),
-                result_id: id.clone(),
-                ..Default::default()
+        let ids: Vec<String> = self.results.lock().unwrap().keys().cloned().collect();
+        let mut found: Vec<_> = ids
+            .into_iter()
+            .filter(|id| self.matches(&request.filters, id))
+            .map(|id| {
+                let result = self.results.lock().unwrap()[&id].clone();
+                results::Raw {
+                    session_id: result.session_id,
+                    name: result.name,
+                    status: result.status,
+                    result_id: id,
+                    ..Default::default()
+                }
             })
             .collect();
         found.sort_by(|a, b| a.result_id.cmp(&b.result_id));
@@ -344,9 +397,9 @@ impl TasksService for Fake {
             .collect();
         let fake = self.clone();
         tokio::task::spawn_blocking(move || {
-            let options = request.task_options.unwrap_or_default();
+            let options = request.task_options.clone().unwrap_or_default();
             for task in request.items.iter().rev() {
-                fake.execute(&options, task);
+                fake.execute(&request.session_id, &options, task);
             }
         });
         Ok(tasks::submit::Response { items })
@@ -367,7 +420,9 @@ impl armonik::server::EventsService for Fake {
         let mut receiver = self.events.subscribe();
         Ok(async_stream::stream! {
             while let Ok((session_id, result_id, status)) = receiver.recv().await {
-                if session_id == request.session_id {
+                if session_id == request.session_id
+                    && self.matches(&request.result_filters, &result_id)
+                {
                     yield Ok(subscribe::Response {
                         session_id,
                         update: Update::ResultStatusUpdate(ResultStatusUpdate { result_id, status }),
@@ -429,14 +484,46 @@ fn scene_bytes() -> Vec<u8> {
     encode_scene(&definition)
 }
 
+/// Never converges, so every block takes exactly 3 passes of 2 samples.
 fn job() -> RenderJob {
+    let mut options = HashMap::new();
+    Convergence {
+        error_threshold: 0.0,
+        max_samples: 6,
+    }
+    .to_options(&mut options);
     RenderJob {
         scene: scene_bytes(),
         // Uneven last column and row.
         blocks: crate::blocks::tile(16, 12, 5, 5),
         samples: 2,
-        task_options: TaskOptions::default(),
+        task_options: TaskOptions {
+            options,
+            ..Default::default()
+        },
         partitions: Vec::new(),
+    }
+}
+
+/// The final accumulation of `block`, replaying its passes.
+fn expected_final(scene: &Scene, job: &RenderJob, block: Block) -> BlockResult {
+    let convergence = Convergence::from_options(&job.task_options.options).unwrap();
+    let mut payload = BlockPayload {
+        block,
+        samples: job.samples,
+        seed: SEED,
+        ..Default::default()
+    };
+    let mut previous = None;
+    loop {
+        let accumulation =
+            accumulate(scene, previous, render(scene, &payload), &convergence).unwrap();
+        if accumulation.done {
+            return accumulation.result;
+        }
+        previous = Some(accumulation.result);
+        // The seed sequence does not depend on the accumulation's id.
+        payload = payload.next(String::new());
     }
 }
 
@@ -470,30 +557,43 @@ async fn renders_every_block(watcher: &dyn ResultWatcher) {
         Some(RunEvent::Finished { error: None })
     ));
     let scene = Scene::from(decode_scene(&job.scene).unwrap());
-    let mut blocks: Vec<_> = received
-        .iter()
-        .filter_map(|event| match event {
-            RunEvent::Block(result) => Some(result),
-            _ => None,
-        })
-        .collect();
-    blocks.sort_by_key(|result| (result.block.y, result.block.x));
-    let mut expected = job.blocks.clone();
-    expected.sort_by_key(|block| (block.y, block.x));
-    assert_eq!(blocks.len(), expected.len());
-    for (result, block) in blocks.into_iter().zip(expected) {
-        let payload = BlockPayload {
-            block,
-            samples: job.samples,
-            seed: SEED,
-        };
-        let pixels: Vec<_> = (0..block.height)
-            .flat_map(|row| render_block_row(&scene, &payload, row))
-            .collect();
-        assert_eq!(result.block, block);
-        assert_eq!(result.samples, job.samples);
-        assert_eq!(result.pixels, pixels);
+    let mut images: HashMap<Block, Vec<(u32, bool, &DisplayBlock)>> = HashMap::new();
+    for event in &received {
+        if let RunEvent::Block { image, done } = event {
+            images
+                .entry(image.block)
+                .or_default()
+                .push((image.samples, *done, image));
+        }
     }
+    assert_eq!(images.len(), job.blocks.len());
+    let mut final_passes = 0;
+    for block in &job.blocks {
+        let shown = &images[block];
+        // Better and better (a final finishing before its submission is
+        // recorded shows first as progress, at the same count), ending with
+        // the final image, shown once.
+        let counts: Vec<_> = shown
+            .iter()
+            .map(|(samples, done, _)| (*samples, *done))
+            .collect();
+        assert!(
+            counts.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "{block:?}: {counts:?}"
+        );
+        let (_, done, image) = shown.last().unwrap();
+        assert!(*done, "{block:?}: {counts:?}");
+        assert_eq!(shown.iter().filter(|(_, done, _)| *done).count(), 1);
+        let expected = expected_final(&scene, &job, *block);
+        assert_eq!(**image, expected.to_display(&scene));
+        // 3 passes, or 1 for the black ones.
+        match expected.samples {
+            6 => final_passes += 1,
+            2 => assert!(expected.is_black()),
+            samples => panic!("{block:?}: {samples} samples"),
+        }
+    }
+    assert!(final_passes > 0, "the scene should not be all black");
     assert!(matches!(
         received
             .iter()
@@ -507,11 +607,12 @@ async fn renders_every_block(watcher: &dyn ResultWatcher) {
 
     assert_eq!(fake.calls(), ["create", "close", "purge", "delete"]);
     let options = fake.submitted_options.lock().unwrap();
-    assert!(
-        options
-            .iter()
-            .all(|o| o.as_ref().unwrap().options.contains_key(SCENE_ID_OPTION))
-    );
+    assert!(options.iter().all(|o| {
+        let options = &o.as_ref().unwrap().options;
+        options.contains_key(SCENE_ID_OPTION)
+            && Convergence::from_options(options).unwrap()
+                == Convergence::from_options(&job.task_options.options).unwrap()
+    }));
 }
 
 #[tokio::test]
@@ -525,6 +626,50 @@ async fn renders_every_block_with_polling() {
         interval: Duration::from_millis(10),
     })
     .await;
+}
+
+/// Blocks still refining show their intermediate images.
+#[tokio::test]
+async fn intermediate_images_show_progress() {
+    let fake = Fake::new(Behavior::Stall);
+    let client = serve(fake.clone()).await;
+    let job = job();
+    let (events, mut received) = mpsc::unbounded_channel();
+    let (sender, mut commands) = mpsc::unbounded_channel();
+    let scene = Scene::from(decode_scene(&job.scene).unwrap());
+
+    let watch = async {
+        let mut first_passes = HashMap::new();
+        while first_passes.len() < job.blocks.len() {
+            if let Some(RunEvent::Block { image, done }) = received.recv().await {
+                assert!(!done);
+                first_passes.insert(image.block, image);
+            }
+        }
+        sender.send(Command::Quit).unwrap();
+        first_passes
+    };
+    let (end, first_passes) = within(async {
+        tokio::join!(
+            run(&client, &job, &EventsWatcher, SEED, &events, &mut commands),
+            watch
+        )
+    })
+    .await;
+    assert_eq!(end, RunEnd::Interrupted(Command::Quit));
+    for block in &job.blocks {
+        let payload = BlockPayload {
+            block: *block,
+            samples: job.samples,
+            seed: SEED,
+            ..Default::default()
+        };
+        assert_eq!(
+            first_passes[block],
+            render(&scene, &payload).to_display(&scene)
+        );
+    }
+    assert_eq!(fake.calls(), ["create", "cancel", "purge", "delete"]);
 }
 
 #[tokio::test]
@@ -616,19 +761,24 @@ async fn demo_loop_reruns_until_quit() {
     );
 }
 
+/// Results finished before the subscription come from the catch-up
+/// listing; both it and the events keep to the name prefix.
 #[tokio::test]
-async fn events_watcher_catches_up_on_earlier_results() {
+async fn events_watcher_catches_up_and_filters_by_name() {
     let fake = Fake::new(Behavior::Render);
     let client = serve(fake.clone()).await;
-    let early = fake.add_result("session", "early".into(), Some(vec![1]));
-    let late = fake.add_result("session", "late".into(), None);
-    fake.add_result("other", "other".into(), Some(vec![1]));
+    fake.add_result("session", "payload-early".into(), Some(vec![1]));
+    let early = fake.add_result("session", "display-early".into(), Some(vec![1]));
+    fake.add_result("other", "display-other".into(), Some(vec![1]));
+    let unwanted = fake.add_result("session", "linear-late".into(), None);
+    let late = fake.add_result("session", "display-late".into(), None);
 
-    let mut updates = EventsWatcher.watch(client, "session".into());
+    let mut updates = EventsWatcher.watch(client, "session".into(), "display-".into());
     let first = within(updates.next()).await.unwrap();
     assert_eq!(first.result_id, early.result_id);
     assert_eq!(first.status, ResultStatus::Completed);
 
+    fake.finish(&unwanted.result_id, ResultStatus::Completed, Some(vec![2]));
     fake.finish(&late.result_id, ResultStatus::Completed, Some(vec![2]));
     let second = within(updates.next()).await.unwrap();
     assert_eq!(second.result_id, late.result_id);
@@ -650,27 +800,52 @@ fn update(result_id: &str, status: ResultStatus) -> ResultUpdate {
     }
 }
 
+fn final_(result_id: &str, x: u32, status: ResultStatus) -> Option<Finished> {
+    Some(Finished::Final {
+        result_id: result_id.into(),
+        block: block(x),
+        status,
+    })
+}
+
 #[test]
-fn tracker_matches_finishes_in_either_order() {
+fn tracker_sorts_finals_from_progress_in_either_order() {
     let mut tracker = Tracker::default();
     // Submitted, then finished.
     assert_eq!(tracker.expect("a".into(), block(0)), None);
     assert_eq!(
         tracker.update(update("a", ResultStatus::Completed)),
-        Some(("a".into(), block(0), ResultStatus::Completed))
+        final_("a", 0, ResultStatus::Completed)
     );
-    // Finished before its submission was recorded.
-    assert_eq!(tracker.update(update("b", ResultStatus::Aborted)), None);
+    // An unknown image is progress, once.
+    let progress = Some(Finished::Progress {
+        result_id: "p".into(),
+    });
+    assert_eq!(
+        tracker.update(update("p", ResultStatus::Completed)),
+        progress
+    );
+    assert_eq!(tracker.update(update("p", ResultStatus::Completed)), None);
+    // A final finishing before its submission is recorded: shown as
+    // progress, then claimed as final.
+    assert_eq!(
+        tracker.update(update("b", ResultStatus::Completed)),
+        Some(Finished::Progress {
+            result_id: "b".into()
+        })
+    );
     assert_eq!(
         tracker.expect("b".into(), block(1)),
-        Some(("b".into(), block(1), ResultStatus::Aborted))
+        final_("b", 1, ResultStatus::Completed)
     );
-    // Duplicates and foreign results are dropped.
-    assert_eq!(tracker.update(update("a", ResultStatus::Completed)), None);
-    assert_eq!(tracker.update(update("b", ResultStatus::Aborted)), None);
+    // An early abort is not progress, but still fails its block.
+    assert_eq!(tracker.update(update("c", ResultStatus::Aborted)), None);
     assert_eq!(
-        tracker.update(update("payload", ResultStatus::Completed)),
-        None
+        tracker.expect("c".into(), block(2)),
+        final_("c", 2, ResultStatus::Aborted)
     );
+    // Finals are reported once.
+    assert_eq!(tracker.update(update("a", ResultStatus::Completed)), None);
+    assert_eq!(tracker.update(update("b", ResultStatus::Completed)), None);
     assert!(tracker.pending.is_empty());
 }

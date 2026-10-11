@@ -15,8 +15,8 @@ use armonik::reexports::{tokio, tonic};
 use armonik::server::{AgentService, RequestContext, WorkerService};
 use armonik::{Output, TaskOptions, worker};
 use raytracer::{
-    Block, BlockPayload, BlockResult, Scene, SceneDefinition, decode_scene, encode_scene,
-    render_block_row,
+    Block, BlockOutputs, BlockPayload, BlockResult, Convergence, DisplayBlock, Scene,
+    SceneDefinition, decode_scene, encode_scene, render_block_row,
 };
 
 use super::*;
@@ -213,18 +213,20 @@ impl Harness {
         std::fs::read(self.folder.path().join(id)).unwrap()
     }
 
-    /// A request rendering `payload_id` with the scene `scene_id` into
-    /// `result`.
+    /// A request rendering `payload_id` with the scene `scene_id`, expecting
+    /// the block's final results, with the given convergence options.
     fn request(&self, scene_id: &str, payload_id: &str) -> worker::process::Request {
+        let mut options = HashMap::from([(SCENE_ID_OPTION.into(), scene_id.into())]);
+        Convergence::default().to_options(&mut options);
         worker::process::Request {
             communication_token: "token".into(),
             session_id: "session".into(),
             task_id: "task".into(),
             task_options: TaskOptions {
-                options: HashMap::from([(SCENE_ID_OPTION.into(), scene_id.into())]),
+                options,
                 ..Default::default()
             },
-            expected_output_keys: vec!["result".into()],
+            expected_output_keys: vec![FINAL_LINEAR.into(), FINAL_DISPLAY.into()],
             payload_id: payload_id.into(),
             data_dependencies: vec![scene_id.into()],
             data_folder: path_string(self.folder.path()),
@@ -244,11 +246,30 @@ impl Harness {
     fn notified(&self) -> Vec<notify_result_data::Request> {
         self.agent.notified.lock().unwrap().clone()
     }
+
+    /// The `create_results` calls: (name, data) of every created result.
+    fn created(&self) -> Vec<(String, Vec<u8>)> {
+        self.agent
+            .created
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|request| &request.results)
+            .map(|result| (result.name.clone(), result.data.to_vec()))
+            .collect()
+    }
+
+    fn submitted(&self) -> Vec<submit_tasks::Request> {
+        self.agent.submitted.lock().unwrap().clone()
+    }
 }
 
 fn path_string(path: &Path) -> String {
     path.to_str().unwrap().to_owned()
 }
+
+const FINAL_LINEAR: &str = "final-linear";
+const FINAL_DISPLAY: &str = "final-display";
 
 fn scene_definition() -> SceneDefinition {
     decode_scene(
@@ -265,64 +286,215 @@ fn scene_definition() -> SceneDefinition {
     .unwrap()
 }
 
-const PAYLOAD: BlockPayload = BlockPayload {
-    block: Block {
-        x: 3,
-        y: 2,
-        width: 5,
-        height: 7,
-    },
-    samples: 3,
-    seed: 42,
+const BLOCK: Block = Block {
+    x: 3,
+    y: 2,
+    width: 5,
+    height: 7,
 };
 
-#[tokio::test]
-async fn renders_block_and_sends_result() {
+fn payload() -> BlockPayload {
+    BlockPayload {
+        block: BLOCK,
+        samples: 3,
+        seed: 42,
+        outputs: BlockOutputs {
+            linear: FINAL_LINEAR.into(),
+            display: FINAL_DISPLAY.into(),
+        },
+        previous: None,
+    }
+}
+
+/// The pass `payload` renders, sequentially.
+fn pass(payload: &BlockPayload) -> BlockResult {
+    let scene = Scene::from(scene_definition());
+    BlockResult {
+        block: payload.block,
+        samples: payload.samples,
+        pixels: (0..payload.block.height)
+            .flat_map(|row| render_block_row(&scene, payload, row))
+            .collect(),
+    }
+}
+
+/// A harness with the scene (`scene`) and the first pass's payload
+/// (`payload`) in its data folder.
+async fn harness() -> Harness {
     let harness = Harness::new().await;
     harness.write("scene", encode_scene(&scene_definition()));
-    harness.write("payload", PAYLOAD.encode());
+    harness.write("payload", payload().encode());
+    harness
+}
 
-    let output = harness.process(harness.request("scene", "payload")).await;
-    assert_eq!(output, Output::Ok);
+/// A request for a later pass over the block, starting from `previous`
+/// (written as `accumulation`), with the given convergence.
+fn later_pass(
+    harness: &Harness,
+    previous: &BlockResult,
+    convergence: Convergence,
+) -> (worker::process::Request, BlockPayload) {
+    harness.write("accumulation", previous.encode());
+    let next = payload().next("accumulation".into());
+    harness.write("next", next.encode());
+    let mut request = harness.request("scene", "next");
+    request.data_dependencies.push("accumulation".into());
+    convergence.to_options(&mut request.task_options.options);
+    (request, next)
+}
 
-    let result = BlockResult::decode(&harness.read("result")).unwrap();
-    assert_eq!(result.block, PAYLOAD.block);
-    assert_eq!(result.samples, PAYLOAD.samples);
+fn assert_finals(harness: &Harness, expected: &BlockResult) {
+    let linear = BlockResult::decode(&harness.read(FINAL_LINEAR)).unwrap();
+    assert_eq!(&linear, expected);
+    let display = DisplayBlock::decode(&harness.read(FINAL_DISPLAY)).unwrap();
+    assert_eq!(
+        display,
+        expected.to_display(&Scene::from(scene_definition()))
+    );
+    let notified: Vec<_> = harness
+        .notified()
+        .into_iter()
+        .flat_map(|request| request.result_ids)
+        .collect();
+    assert_eq!(notified, [FINAL_LINEAR, FINAL_DISPLAY]);
+    assert!(harness.submitted().is_empty());
+}
+
+#[tokio::test]
+async fn a_first_pass_delegates_to_a_follow_up() {
+    let harness = harness().await;
+    assert_eq!(
+        harness.process(harness.request("scene", "payload")).await,
+        Output::Ok
+    );
+
+    // The accumulation and its display image, then the follow-up payload.
+    let created = harness.created();
+    let names: Vec<_> = created.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["linear-3-2", "display-3-2", "payload-3-2"]);
     // Rows rendered in parallel land in order, and match a sequential
     // render sample for sample.
-    let scene = Scene::from(scene_definition());
-    let expected: Vec<_> = (0..PAYLOAD.block.height)
-        .flat_map(|row| render_block_row(&scene, &PAYLOAD, row))
-        .collect();
-    assert_eq!(result.pixels, expected);
-    assert!(result.pixels.iter().any(|p| p.r > 0.0));
+    let expected = pass(&payload());
+    assert!(expected.pixels.iter().any(|p| p.r > 0.0));
+    assert_eq!(BlockResult::decode(&created[0].1).unwrap(), expected);
+    assert_eq!(
+        DisplayBlock::decode(&created[1].1).unwrap(),
+        expected.to_display(&Scene::from(scene_definition()))
+    );
+    let next = BlockPayload::decode(&created[2].1).unwrap();
+    assert_eq!(next, payload().next("id-linear-3-2".into()));
+
+    let submitted = harness.submitted();
+    let [submission] = submitted.as_slice() else {
+        panic!("{submitted:?}");
+    };
+    assert_eq!(submission.communication_token, "token");
+    let [task] = submission.items.as_slice() else {
+        panic!("{submission:?}");
+    };
+    assert_eq!(task.expected_output_keys, [FINAL_LINEAR, FINAL_DISPLAY]);
+    assert_eq!(task.data_dependencies, ["scene", "id-linear-3-2"]);
+    assert_eq!(task.payload_id, "id-payload-3-2");
+    let options = task.task_options.as_ref().unwrap();
+    assert_eq!(options.priority, FOLLOW_UP_PRIORITY);
+    // The session-wide options carry over.
+    assert_eq!(
+        options.options,
+        harness.request("scene", "payload").task_options.options
+    );
+    // Nothing final yet.
+    assert_eq!(harness.notified(), []);
+}
+
+#[tokio::test]
+async fn a_black_block_is_final_after_one_pass() {
+    let harness = Harness::new().await;
+    let mut empty = scene_definition();
+    empty.objects.clear();
+    harness.write("scene", encode_scene(&empty));
+    harness.write("payload", payload().encode());
 
     assert_eq!(
-        harness.notified(),
-        [notify_result_data::Request {
-            communication_token: "token".into(),
-            session_id: "session".into(),
-            result_ids: vec!["result".into()],
-        }]
+        harness.process(harness.request("scene", "payload")).await,
+        Output::Ok
     );
+    let black = BlockResult {
+        block: BLOCK,
+        samples: 3,
+        pixels: vec![Default::default(); BLOCK.len()],
+    };
+    assert_finals(&harness, &black);
+}
+
+#[tokio::test]
+async fn a_converged_pass_sends_both_final_results() {
+    let harness = harness().await;
+    let previous = pass(&payload());
+    let (request, next) = later_pass(
+        &harness,
+        &previous,
+        Convergence {
+            error_threshold: f32::MAX,
+            ..Default::default()
+        },
+    );
+    assert_eq!(harness.process(request).await, Output::Ok);
+    assert_finals(&harness, &previous.merge(&pass(&next)));
+}
+
+#[tokio::test]
+async fn an_unconverged_pass_delegates_again() {
+    let harness = harness().await;
+    let previous = pass(&payload());
+    let (request, next) = later_pass(
+        &harness,
+        &previous,
+        Convergence {
+            error_threshold: 0.0,
+            ..Default::default()
+        },
+    );
+    assert_eq!(harness.process(request).await, Output::Ok);
+
+    let created = harness.created();
+    let merged = BlockResult::decode(&created[0].1).unwrap();
+    assert_eq!(merged, previous.merge(&pass(&next)));
+    assert_eq!(merged.samples, 6);
+    let follow_up = BlockPayload::decode(&created[2].1).unwrap();
+    assert_eq!(follow_up, next.next("id-linear-3-2".into()));
+    assert_eq!(harness.notified(), []);
+}
+
+#[tokio::test]
+async fn the_sample_cap_ends_the_block() {
+    let harness = harness().await;
+    let previous = pass(&payload());
+    let (request, next) = later_pass(
+        &harness,
+        &previous,
+        Convergence {
+            error_threshold: 0.0,
+            max_samples: 6,
+        },
+    );
+    assert_eq!(harness.process(request).await, Output::Ok);
+    assert_finals(&harness, &previous.merge(&pass(&next)));
 }
 
 #[tokio::test]
 async fn agent_on_unix_socket() {
     let harness = Harness::with_unix_socket();
     harness.write("scene", encode_scene(&scene_definition()));
-    harness.write("payload", PAYLOAD.encode());
+    harness.write("payload", payload().encode());
 
     let output = harness.process(harness.request("scene", "payload")).await;
     assert_eq!(output, Output::Ok);
-    assert_eq!(harness.notified()[0].result_ids, ["result"]);
+    assert_eq!(harness.submitted().len(), 1);
 }
 
 #[tokio::test]
 async fn scene_is_parsed_once_per_scene_id() {
-    let harness = Harness::new().await;
-    harness.write("scene", encode_scene(&scene_definition()));
-    harness.write("payload", PAYLOAD.encode());
+    let harness = harness().await;
     assert_eq!(
         harness.process(harness.request("scene", "payload")).await,
         Output::Ok
@@ -347,21 +519,25 @@ async fn scene_is_parsed_once_per_scene_id() {
 
 #[tokio::test]
 async fn failures_are_reported_in_the_output() {
-    let harness = Harness::new().await;
-    harness.write("scene", encode_scene(&scene_definition()));
-    harness.write("payload", PAYLOAD.encode());
+    let harness = harness().await;
     harness.write(
         "no-samples",
         BlockPayload {
             samples: 0,
-            ..PAYLOAD
+            ..payload()
         }
         .encode(),
     );
     harness.write("garbage", "not json");
+    harness.write("next", payload().next("accumulation".into()).encode());
+    let elsewhere = BlockResult {
+        block: Block { x: 0, ..BLOCK },
+        ..pass(&payload())
+    };
+    harness.write("accumulation", elsewhere.encode());
 
     type Edit = Box<dyn Fn(&mut worker::process::Request)>;
-    let cases: [(&str, Edit); 7] = [
+    let cases: [(&str, Edit); 11] = [
         (
             "could not read payload",
             Box::new(|r| r.payload_id = "missing".into()),
@@ -376,7 +552,9 @@ async fn failures_are_reported_in_the_output() {
         ),
         (
             "sceneId task option is missing",
-            Box::new(|r| r.task_options.options.clear()),
+            Box::new(|r| {
+                r.task_options.options.remove(SCENE_ID_OPTION);
+            }),
         ),
         (
             "not a data dependency",
@@ -392,8 +570,32 @@ async fn failures_are_reported_in_the_output() {
             }),
         ),
         (
-            "expected a single result",
+            "names",
             Box::new(|r| r.expected_output_keys.push("other".into())),
+        ),
+        (
+            "names",
+            Box::new(|r| r.expected_output_keys = vec![FINAL_LINEAR.into()]),
+        ),
+        (
+            "invalid task option",
+            Box::new(|r| {
+                r.task_options
+                    .options
+                    .insert(raytracer::MAX_SAMPLES_OPTION.into(), "many".into());
+            }),
+        ),
+        // The previous accumulation must be declared.
+        (
+            "accumulation is not a data dependency",
+            Box::new(|r| r.payload_id = "next".into()),
+        ),
+        (
+            "expected a result for block",
+            Box::new(|r| {
+                r.payload_id = "next".into();
+                r.data_dependencies.push("accumulation".into());
+            }),
         ),
     ];
     for (message, edit) in cases {
@@ -405,6 +607,7 @@ async fn failures_are_reported_in_the_output() {
         }
     }
     assert_eq!(harness.notified(), []);
+    assert!(harness.submitted().is_empty());
 }
 
 #[tokio::test]
@@ -435,7 +638,7 @@ async fn dropping_the_blocking_future_cancels_the_work() {
 fn render_stops_once_cancelled() {
     let scene = Scene::from(scene_definition());
     let cancelled = AtomicBool::new(true);
-    let err = render_block(&scene, &PAYLOAD, &cancelled).unwrap_err();
+    let err = render_block(&scene, &payload(), &cancelled).unwrap_err();
     assert!(err.to_string().contains("cancelled"), "{err}");
 }
 
@@ -454,7 +657,7 @@ async fn task_handler_forwards_agent_calls() {
     assert_eq!(handler.session_id(), "session");
     assert_eq!(handler.task_id(), "task");
     assert_eq!(handler.task_options().priority, 7);
-    assert_eq!(handler.expected_results(), ["result"]);
+    assert_eq!(handler.expected_results(), [FINAL_LINEAR, FINAL_DISPLAY]);
     assert_eq!(
         handler.data_dependency("dependency").await.unwrap(),
         b"dependency data"

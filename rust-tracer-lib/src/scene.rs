@@ -420,7 +420,13 @@ impl Scene {
     }
 
     pub fn to_u8(&self, value: f32) -> u8 {
-        (value.powf(1f32 / self.gamma) * 255f32 + 0.5f32) as u8
+        (self.display_level(value) + 0.5f32) as u8
+    }
+
+    /// Display level of a radiance value, in [0, 255], before rounding:
+    /// clamped to [0, 1], gamma applied.
+    pub fn display_level(&self, value: f32) -> f32 {
+        value.clamp(0f32, 1f32).powf(1f32 / self.gamma) * 255f32
     }
 }
 

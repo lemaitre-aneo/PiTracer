@@ -22,13 +22,17 @@ pub struct ResultUpdate {
 
 /// Source of the final statuses of a session's results.
 pub trait ResultWatcher: Send + Sync {
-    /// Streams the results of `session_id` that are completed or aborted,
-    /// including those that already were when the stream starts. Every such
-    /// result is reported at least once; duplicates are possible, and so are
-    /// results the caller does not care about (e.g. task payloads), so the
-    /// caller filters. Transient errors are logged and retried: the stream
-    /// never ends on its own.
-    fn watch(&self, client: Client, session_id: String) -> BoxStream<'static, ResultUpdate>;
+    /// Streams the results of `session_id` whose name starts with
+    /// `name_prefix` and that are completed or aborted, including those that
+    /// already were when the stream starts. Every such result is reported at
+    /// least once; duplicates are possible, so the caller filters. Transient
+    /// errors are logged and retried: the stream never ends on its own.
+    fn watch(
+        &self,
+        client: Client,
+        session_id: String,
+        name_prefix: String,
+    ) -> BoxStream<'static, ResultUpdate>;
 }
 
 /// The available [`ResultWatcher`]s.
@@ -61,7 +65,12 @@ const PAGE_SIZE: i32 = 500;
 pub struct EventsWatcher;
 
 impl ResultWatcher for EventsWatcher {
-    fn watch(&self, client: Client, session_id: String) -> BoxStream<'static, ResultUpdate> {
+    fn watch(
+        &self,
+        client: Client,
+        session_id: String,
+        name_prefix: String,
+    ) -> BoxStream<'static, ResultUpdate> {
         async_stream::stream! {
             let mut events_client = client.clone().into_events();
             let mut results = client.into_results();
@@ -70,7 +79,7 @@ impl ResultWatcher for EventsWatcher {
                     .subscribe(
                         &session_id,
                         Vec::<Vec<armonik::tasks::filter::Field>>::new(),
-                        Vec::<Vec<FilterField>>::new(),
+                        [[name_filter(&name_prefix)]],
                         [EventsEnum::ResultStatusUpdate],
                     )
                     .await;
@@ -78,7 +87,7 @@ impl ResultWatcher for EventsWatcher {
                     Ok(events) => {
                         // Catch up only once subscribed, so nothing finishing
                         // in between can be missed.
-                        match list_finished(&mut results, &session_id).await {
+                        match list_finished(&mut results, &session_id, &name_prefix).await {
                             Ok(finished) => {
                                 for update in finished {
                                     yield update;
@@ -126,12 +135,17 @@ pub struct PollingWatcher {
 }
 
 impl ResultWatcher for PollingWatcher {
-    fn watch(&self, client: Client, session_id: String) -> BoxStream<'static, ResultUpdate> {
+    fn watch(
+        &self,
+        client: Client,
+        session_id: String,
+        name_prefix: String,
+    ) -> BoxStream<'static, ResultUpdate> {
         let interval = self.interval;
         async_stream::stream! {
             let mut results = client.into_results();
             loop {
-                match list_finished(&mut results, &session_id).await {
+                match list_finished(&mut results, &session_id, &name_prefix).await {
                     Ok(finished) => {
                         for update in finished {
                             yield update;
@@ -150,10 +164,22 @@ fn is_final(status: &ResultStatus) -> bool {
     matches!(status, ResultStatus::Completed | ResultStatus::Aborted)
 }
 
-/// All the completed or aborted results of the session, page by page.
+fn name_filter(prefix: &str) -> FilterField {
+    FilterField {
+        field: armonik::results::Field::Name,
+        condition: Condition::String(FilterString {
+            value: prefix.to_owned(),
+            operator: FilterStringOperator::StartsWith,
+        }),
+    }
+}
+
+/// All the completed or aborted results of the session named
+/// `name_prefix...`, page by page.
 async fn list_finished(
     results: &mut Results<Client>,
     session_id: &str,
+    name_prefix: &str,
 ) -> Result<Vec<ResultUpdate>, armonik::client::RequestError> {
     let session = FilterField {
         field: armonik::results::Field::SessionId,
@@ -165,6 +191,7 @@ async fn list_finished(
     let filters = [ResultStatus::Completed, ResultStatus::Aborted].map(|status| {
         [
             session.clone(),
+            name_filter(name_prefix),
             FilterField {
                 field: armonik::results::Field::Status,
                 condition: Condition::Status(Status {

@@ -1,17 +1,30 @@
-//! Wire format of the distributed (ArmoniK) rendering tasks, shared by the
-//! worker and the client.
+//! Wire format and convergence logic of the distributed (ArmoniK) rendering
+//! tasks, shared by the worker and the client.
 //!
 //! A render session uploads one scene ([`encode_scene`]), shared by every
-//! task as a data dependency. Each task renders one rectangular [`Block`] of
-//! the image: its payload is a [`BlockPayload`] (block, samples per pixel,
-//! seed) and its single output is a [`BlockResult`] holding the block's
-//! linear radiance in f32 (gamma is left to the client) together with the
-//! sample count it averages, so results of successive passes over the same
-//! block can be merged by weight.
+//! task as a data dependency named by the [`SCENE_ID_OPTION`] task option.
+//! Each block of the image is refined by a chain of tasks, one pass of
+//! [`BlockPayload::samples`] samples per pixel each:
+//!
+//! - the client submits the first task of each block, expecting the block's
+//!   two final results ([`BlockOutputs`]): the linear radiance
+//!   ([`BlockResult`], f32) and the display image ([`DisplayBlock`], u8,
+//!   gamma applied);
+//! - a task merges its pass into the accumulation of the previous passes
+//!   ([`accumulate`]); converged, it sends both final results; otherwise it
+//!   creates the new accumulation (`linear-x-y`) and its display image
+//!   (`display-x-y`), and delegates the final results to a follow-up task
+//!   that takes the accumulation as input ([`BlockPayload::next`]).
+//!
+//! The client therefore knows from the start which results end the render,
+//! and follows the progress through the intermediate display images, found
+//! by name ([`DISPLAY_NAME`]) and self-describing (block, sample count).
 //!
 //! Coordinates are in display space: `(0, 0)` is the top-left pixel and
 //! `y` grows downwards (the camera's own pixel rows are bottom-up; the flip
 //! happens in [`render_block_row`]).
+
+use std::collections::HashMap;
 
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -22,6 +35,28 @@ use crate::{Camera, Color, Scene, SceneDefinition};
 /// Task option naming the result that holds the session's scene; every
 /// task lists that result among its data dependencies.
 pub const SCENE_ID_OPTION: &str = "sceneId";
+/// Task option: a block is converged once the estimated mean squared error
+/// of its display image (8-bit levels, see [`estimated_display_error`]) is
+/// at most this value.
+pub const ERROR_THRESHOLD_OPTION: &str = "errorMetricThreshold";
+/// Task option: a block is final once it accumulates this many samples per
+/// pixel, converged or not.
+pub const MAX_SAMPLES_OPTION: &str = "maxSamples";
+
+/// Result name prefixes; a result name is `<prefix>-<x>-<y>` ([`name`]).
+pub const PAYLOAD_NAME: &str = "payload";
+/// Intermediate accumulation of a block.
+pub const LINEAR_NAME: &str = "linear";
+/// Display images, intermediate (`display-x-y`) and final
+/// (`display-final-x-y`): every name starting with `display-`.
+pub const DISPLAY_NAME: &str = "display";
+pub const FINAL_LINEAR_NAME: &str = "linear-final";
+pub const FINAL_DISPLAY_NAME: &str = "display-final";
+
+/// Name of the `prefix` result of `block`.
+pub fn name(prefix: &str, block: &Block) -> String {
+    format!("{prefix}-{}-{}", block.x, block.y)
+}
 
 /// Rectangle of pixels, in display space (`y = 0` is the top row).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,17 +79,33 @@ impl Block {
     }
 }
 
-/// Payload of one rendering task.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Ids of the two final results of a block, expected by every task of its
+/// chain (each delegating them to the next one).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockOutputs {
+    /// Final [`BlockResult`].
+    pub linear: String,
+    /// Final [`DisplayBlock`].
+    pub display: String,
+}
+
+/// Payload of one rendering task: one pass over a block.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockPayload {
     pub block: Block,
-    /// Samples per pixel (overrides the scene's `samples`).
+    /// Samples per pixel of the pass (overrides the scene's `samples`).
     pub samples: u32,
-    /// Seed of the task's random streams. Two tasks rendering the same block
+    /// Seed of the pass's random streams. Two passes over the same block
     /// must use different seeds, or they compute the exact same samples
     /// (different blocks get independent streams even with equal seeds).
     pub seed: u64,
+    pub outputs: BlockOutputs,
+    /// Accumulation of the previous passes ([`BlockResult`], a data
+    /// dependency of the task); absent on the first pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
 }
 
 impl BlockPayload {
@@ -90,10 +141,131 @@ impl BlockPayload {
             })
         }
     }
+
+    /// Payload of the follow-up pass, continuing from the accumulation
+    /// `previous` with a fresh seed.
+    pub fn next(&self, previous: String) -> Self {
+        Self {
+            seed: splitmix64(self.seed),
+            previous: Some(previous),
+            ..self.clone()
+        }
+    }
 }
 
-/// Output of one rendering task: the mean linear radiance of each pixel of
-/// `block` over `samples` samples, row-major, top row first.
+/// When a block is done, read from the task options (with defaults).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Convergence {
+    /// See [`ERROR_THRESHOLD_OPTION`].
+    pub error_threshold: f32,
+    /// See [`MAX_SAMPLES_OPTION`].
+    pub max_samples: u32,
+}
+
+impl Default for Convergence {
+    fn default() -> Self {
+        Self {
+            // The Python client's default.
+            error_threshold: 5.0,
+            max_samples: 10_000,
+        }
+    }
+}
+
+impl Convergence {
+    /// Reads the options, defaulting the missing ones.
+    pub fn from_options(options: &HashMap<String, String>) -> Result<Self, WireError> {
+        fn parse<T: std::str::FromStr>(
+            options: &HashMap<String, String>,
+            name: &'static str,
+            default: T,
+        ) -> Result<T, WireError> {
+            match options.get(name) {
+                None => Ok(default),
+                Some(value) => value.parse().map_err(|_| WireError::InvalidOption {
+                    name,
+                    value: value.clone(),
+                }),
+            }
+        }
+        let default = Self::default();
+        let convergence = Self {
+            error_threshold: parse(options, ERROR_THRESHOLD_OPTION, default.error_threshold)?,
+            max_samples: parse(options, MAX_SAMPLES_OPTION, default.max_samples)?,
+        };
+        if convergence.error_threshold.is_nan() || convergence.error_threshold < 0.0 {
+            return Err(WireError::InvalidOption {
+                name: ERROR_THRESHOLD_OPTION,
+                value: convergence.error_threshold.to_string(),
+            });
+        }
+        Ok(convergence)
+    }
+
+    /// Writes the options [`Convergence::from_options`] reads.
+    pub fn to_options(&self, options: &mut HashMap<String, String>) {
+        options.insert(
+            ERROR_THRESHOLD_OPTION.into(),
+            self.error_threshold.to_string(),
+        );
+        options.insert(MAX_SAMPLES_OPTION.into(), self.max_samples.to_string());
+    }
+}
+
+/// Little-endian header shared by the binary results: a 4-byte format tag,
+/// then the block (x, y, width, height) and the sample count as u32.
+const HEADER_LEN: usize = 4 + 5 * 4;
+
+fn encode_header(magic: [u8; 4], block: &Block, samples: u32, pixel_len: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(HEADER_LEN + block.len() * pixel_len);
+    bytes.extend_from_slice(&magic);
+    for value in [block.x, block.y, block.width, block.height, samples] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+/// Splits `bytes` into block, sample count and pixel data, checking the tag
+/// and that the data holds exactly one `pixel_len` record per pixel.
+fn decode_header(
+    bytes: &[u8],
+    magic: [u8; 4],
+    pixel_len: usize,
+) -> Result<(Block, u32, &[u8]), WireError> {
+    let (header, data) = bytes
+        .split_at_checked(HEADER_LEN)
+        .ok_or(WireError::Length {
+            expected: HEADER_LEN,
+            actual: bytes.len(),
+        })?;
+    let (tag, fields) = header.split_at(magic.len());
+    if tag != magic {
+        return Err(WireError::BadMagic);
+    }
+    let mut fields = fields
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()));
+    let mut field = || fields.next().unwrap();
+    let block = Block {
+        x: field(),
+        y: field(),
+        width: field(),
+        height: field(),
+    };
+    let samples = field();
+
+    let expected = block.len() * pixel_len;
+    if data.len() != expected {
+        return Err(WireError::Length {
+            expected: HEADER_LEN + expected,
+            actual: bytes.len(),
+        });
+    }
+    Ok((block, samples, data))
+}
+
+/// Mean linear radiance of each pixel of `block` over `samples` samples,
+/// row-major, top row first.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct BlockResult {
     pub block: Block,
@@ -104,30 +276,16 @@ pub struct BlockResult {
 impl BlockResult {
     /// Format tag and version; bump it on any layout change.
     const MAGIC: [u8; 4] = *b"PTB1";
-    /// Magic, then x, y, width, height and samples as u32.
-    const HEADER_LEN: usize = 4 + 5 * 4;
     const PIXEL_LEN: usize = 3 * 4;
 
-    /// Little-endian binary layout: the [`Self::MAGIC`] tag, the block
-    /// (x, y, width, height) and the sample count as u32, then the pixels as
-    /// r, g, b f32 triplets.
+    /// The common header, then the pixels as r, g, b f32 triplets.
     pub fn encode(&self) -> Vec<u8> {
         assert_eq!(
             self.pixels.len(),
             self.block.len(),
             "pixel count does not match the block size"
         );
-        let mut bytes = Vec::with_capacity(Self::HEADER_LEN + self.pixels.len() * Self::PIXEL_LEN);
-        bytes.extend_from_slice(&Self::MAGIC);
-        for value in [
-            self.block.x,
-            self.block.y,
-            self.block.width,
-            self.block.height,
-            self.samples,
-        ] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
+        let mut bytes = encode_header(Self::MAGIC, &self.block, self.samples, Self::PIXEL_LEN);
         for pixel in &self.pixels {
             for value in [pixel.r, pixel.g, pixel.b] {
                 bytes.extend_from_slice(&value.to_le_bytes());
@@ -137,35 +295,7 @@ impl BlockResult {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let (header, data) = bytes
-            .split_at_checked(Self::HEADER_LEN)
-            .ok_or(WireError::Length {
-                expected: Self::HEADER_LEN,
-                actual: bytes.len(),
-            })?;
-        let (magic, fields) = header.split_at(Self::MAGIC.len());
-        if magic != Self::MAGIC {
-            return Err(WireError::BadMagic);
-        }
-        let mut fields = fields
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()));
-        let mut field = || fields.next().unwrap();
-        let block = Block {
-            x: field(),
-            y: field(),
-            width: field(),
-            height: field(),
-        };
-        let samples = field();
-
-        let expected = block.len() * Self::PIXEL_LEN;
-        if data.len() != expected {
-            return Err(WireError::Length {
-                expected: Self::HEADER_LEN + expected,
-                actual: bytes.len(),
-            });
-        }
+        let (block, samples, data) = decode_header(bytes, Self::MAGIC, Self::PIXEL_LEN)?;
         let pixels = data
             .chunks_exact(Self::PIXEL_LEN)
             .map(|pixel| {
@@ -180,13 +310,163 @@ impl BlockResult {
                 }
             })
             .collect();
-
         Ok(Self {
             block,
             samples,
             pixels,
         })
     }
+
+    /// Whether every pixel is exactly black. Radiance is never negative, so
+    /// a zero mean means every sample was zero: the block is not noisy, it
+    /// is genuinely black.
+    pub fn is_black(&self) -> bool {
+        self.pixels.iter().all(|pixel| *pixel == Color::default())
+    }
+
+    /// The mean over the samples of both results (of the same block).
+    pub fn merge(&self, other: &BlockResult) -> BlockResult {
+        let samples = self.samples + other.samples;
+        let weight = other.samples as f32 / samples as f32;
+        BlockResult {
+            block: self.block,
+            samples,
+            pixels: self
+                .pixels
+                .iter()
+                .zip(&other.pixels)
+                .map(|(&mine, &theirs)| mine + (theirs - mine) * weight)
+                .collect(),
+        }
+    }
+
+    /// The display image, with the scene's gamma.
+    pub fn to_display(&self, scene: &Scene) -> DisplayBlock {
+        DisplayBlock {
+            block: self.block,
+            samples: self.samples,
+            pixels: self
+                .pixels
+                .iter()
+                .map(|&pixel| scene.to_u8_color(pixel))
+                .collect(),
+        }
+    }
+}
+
+/// Display image of a block (gamma applied, 8 bits per channel), row-major,
+/// top row first, with the sample count it was made from.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DisplayBlock {
+    pub block: Block,
+    pub samples: u32,
+    pub pixels: Vec<[u8; 3]>,
+}
+
+impl DisplayBlock {
+    /// Format tag and version; bump it on any layout change.
+    const MAGIC: [u8; 4] = *b"PTD1";
+    const PIXEL_LEN: usize = 3;
+
+    /// The common header, then the pixels as r, g, b bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        assert_eq!(
+            self.pixels.len(),
+            self.block.len(),
+            "pixel count does not match the block size"
+        );
+        let mut bytes = encode_header(Self::MAGIC, &self.block, self.samples, Self::PIXEL_LEN);
+        bytes.extend(self.pixels.iter().flatten());
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let (block, samples, data) = decode_header(bytes, Self::MAGIC, Self::PIXEL_LEN)?;
+        Ok(Self {
+            block,
+            samples,
+            pixels: data
+                .chunks_exact(Self::PIXEL_LEN)
+                .map(|pixel| pixel.try_into().unwrap())
+                .collect(),
+        })
+    }
+}
+
+/// Estimated mean squared error of `merged`'s display image (continuous
+/// 8-bit levels, before rounding), from the change the last pass of
+/// `pass_samples` samples made to it, starting from `previous`.
+///
+/// With `previous` the mean of n' samples and `merged` the mean of
+/// n = n' + m, the expected squared change is `m * var / (n * n')` while the
+/// error left in `merged` is `var / n`: the change underestimates the error
+/// by `m / n'`, a factor that keeps shrinking, so a fixed threshold on the
+/// raw change would stop at an error depending on the pass size and the
+/// noise level. Hence the `n' / m` rescaling. Display levels are a
+/// nonlinear function of the radiance; for the small changes of a
+/// converging block the relation holds to first order.
+pub fn estimated_display_error(
+    scene: &Scene,
+    previous: &BlockResult,
+    merged: &BlockResult,
+    pass_samples: u32,
+) -> f32 {
+    let channels = |color: Color| [color.r, color.g, color.b];
+    let mut sum = 0f64;
+    for (&before, &after) in previous.pixels.iter().zip(&merged.pixels) {
+        for (before, after) in channels(before).into_iter().zip(channels(after)) {
+            let change = scene.display_level(after) - scene.display_level(before);
+            sum += (change as f64).powi(2);
+        }
+    }
+    let values = (3 * merged.pixels.len()).max(1) as f64;
+    (sum / values * previous.samples as f64 / pass_samples as f64) as f32
+}
+
+/// The accumulation of a block after a pass, and whether it is final.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Accumulation {
+    pub result: BlockResult,
+    /// [`estimated_display_error`], when there was a previous accumulation
+    /// to estimate it from.
+    pub error: Option<f32>,
+    /// Converged, black, or out of samples.
+    pub done: bool,
+}
+
+/// Merges a pass into the previous accumulation of its block (if any) and
+/// decides whether the block is done. A first pass cannot estimate its own
+/// error, so it is only final when black (or already at the sample cap).
+pub fn accumulate(
+    scene: &Scene,
+    previous: Option<BlockResult>,
+    pass: BlockResult,
+    convergence: &Convergence,
+) -> Result<Accumulation, WireError> {
+    let (result, error) = match previous {
+        None => (pass, None),
+        Some(previous) => {
+            if previous.block != pass.block {
+                return Err(WireError::BlockMismatch {
+                    expected: pass.block,
+                    actual: previous.block,
+                });
+            }
+            let merged = previous.merge(&pass);
+            let error = estimated_display_error(scene, &previous, &merged, pass.samples);
+            (merged, Some(error))
+        }
+    };
+    let done = result.samples >= convergence.max_samples
+        || match error {
+            None => result.is_black(),
+            Some(error) => error <= convergence.error_threshold,
+        };
+    Ok(Accumulation {
+        result,
+        error,
+        done,
+    })
 }
 
 /// Encodes the shared scene of a render session.
@@ -245,13 +525,21 @@ pub enum WireError {
         width: u32,
         height: u32,
     },
+    BlockMismatch {
+        expected: Block,
+        actual: Block,
+    },
+    InvalidOption {
+        name: &'static str,
+        value: String,
+    },
 }
 
 impl std::fmt::Display for WireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WireError::Json(err) => write!(f, "invalid JSON: {err}"),
-            WireError::BadMagic => write!(f, "not a block result (bad magic)"),
+            WireError::BadMagic => write!(f, "not a result of the expected format (bad magic)"),
             WireError::Length { expected, actual } => {
                 write!(f, "expected {expected} bytes, got {actual}")
             }
@@ -261,6 +549,15 @@ impl std::fmt::Display for WireError {
                 width,
                 height,
             } => write!(f, "block {block:?} exceeds the {width}x{height} image"),
+            WireError::BlockMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "expected a result for block {expected:?}, got {actual:?}"
+                )
+            }
+            WireError::InvalidOption { name, value } => {
+                write!(f, "invalid task option {name}={value:?}")
+            }
         }
     }
 }
@@ -281,231 +578,4 @@ impl From<serde_json::Error> for WireError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BLOCK: Block = Block {
-        x: 2,
-        y: 1,
-        width: 3,
-        height: 2,
-    };
-
-    /// Camera at the origin looking down -Z, with an emissive quad covering
-    /// the upper half of the view (y > 0) and nothing below.
-    fn half_lit_scene(width: u32, height: u32) -> Scene {
-        let json = format!(
-            r#"{{
-                "camera": {{
-                    "origin": [0, 0, 0],
-                    "direction": [0, 0, -1],
-                    "field_of_view": 90,
-                    "width": {width},
-                    "height": {height}
-                }},
-                "objects": [{{
-                    "type": "quad",
-                    "position": [-100, 0, -10],
-                    "u": [200, 0, 0],
-                    "v": [0, 100, 0],
-                    "emission": [1, 2, 3]
-                }}]
-            }}"#
-        );
-        decode_scene(json.as_bytes()).unwrap().into()
-    }
-
-    fn payload(block: Block, seed: u64) -> BlockPayload {
-        BlockPayload {
-            block,
-            samples: 4,
-            seed,
-        }
-    }
-
-    #[test]
-    fn payload_round_trip() {
-        let payload = payload(BLOCK, u64::MAX);
-        assert_eq!(BlockPayload::decode(&payload.encode()).unwrap(), payload);
-    }
-
-    #[test]
-    fn payload_rejects_unknown_fields() {
-        let json =
-            br#"{"block":{"x":0,"y":0,"width":1,"height":1},"samples":1,"seed":0,"sample":2}"#;
-        assert!(matches!(
-            BlockPayload::decode(json),
-            Err(WireError::Json(_))
-        ));
-    }
-
-    #[test]
-    fn payload_validation() {
-        let camera = half_lit_scene(8, 4).camera;
-        assert!(payload(BLOCK, 0).validate(&camera).is_ok());
-        // Touching the far edges is fine.
-        let corner = Block {
-            x: 5,
-            y: 2,
-            width: 3,
-            height: 2,
-        };
-        assert!(payload(corner, 0).validate(&camera).is_ok());
-
-        let overflowing = [
-            Block { x: 6, ..corner },
-            Block { y: 3, ..corner },
-            Block {
-                x: u32::MAX,
-                ..corner
-            },
-        ];
-        for block in overflowing {
-            assert!(
-                matches!(
-                    payload(block, 0).validate(&camera),
-                    Err(WireError::OutOfImage { .. })
-                ),
-                "{block:?}"
-            );
-        }
-        let no_samples = BlockPayload {
-            samples: 0,
-            ..payload(BLOCK, 0)
-        };
-        assert!(matches!(
-            no_samples.validate(&camera),
-            Err(WireError::NoSamples)
-        ));
-    }
-
-    fn result() -> BlockResult {
-        BlockResult {
-            block: BLOCK,
-            samples: 17,
-            pixels: (0..BLOCK.len())
-                .map(|i| Color {
-                    r: i as f32,
-                    g: -0.5,
-                    b: f32::MAX,
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn result_round_trip() {
-        let result = result();
-        let bytes = result.encode();
-        assert_eq!(bytes.len(), 24 + 12 * BLOCK.len());
-        assert_eq!(BlockResult::decode(&bytes).unwrap(), result);
-    }
-
-    #[test]
-    fn empty_result_round_trip() {
-        let result = BlockResult {
-            block: Block { width: 0, ..BLOCK },
-            samples: 1,
-            pixels: Vec::new(),
-        };
-        assert_eq!(BlockResult::decode(&result.encode()).unwrap(), result);
-    }
-
-    #[test]
-    fn result_rejects_malformed_bytes() {
-        let bytes = result().encode();
-        for len in [0, 23, 24, bytes.len() - 1] {
-            assert!(
-                matches!(
-                    BlockResult::decode(&bytes[..len]),
-                    Err(WireError::Length { .. })
-                ),
-                "truncated to {len}"
-            );
-        }
-        let mut longer = bytes.clone();
-        longer.push(0);
-        assert!(matches!(
-            BlockResult::decode(&longer),
-            Err(WireError::Length { .. })
-        ));
-        let mut bad_magic = bytes;
-        bad_magic[0] = b'X';
-        assert!(matches!(
-            BlockResult::decode(&bad_magic),
-            Err(WireError::BadMagic)
-        ));
-    }
-
-    #[test]
-    fn scene_round_trip() {
-        let scene = r#"{
-            "camera": {"origin": [1, 2, 3], "direction": [0, 0, -1], "width": 64, "height": 48},
-            "samples": 7,
-            "objects": [
-                {"type": "sphere", "radius": 2, "position": [0, 0, -5], "material": "Metal", "fuzziness": 0.1},
-                {"type": "sphere", "radius": 1, "position": [3, 0, -5], "material": "Refraction"},
-                {"type": "quad", "position": [0, 0, 0], "u": [1, 0, 0], "v": [0, 1, 0], "emission": [4, 4, 4]},
-                {"type": "ellipse", "position": [0, 0, 0], "u": [1, 0, 0], "v": [0, 2, 0], "texture": "marble", "scale": 3}
-            ]
-        }"#;
-        let definition = decode_scene(scene.as_bytes()).unwrap();
-        let round_trip = decode_scene(&encode_scene(&definition)).unwrap();
-        // Debug prints f32 losslessly, so equal dumps mean equal scenes.
-        assert_eq!(format!("{round_trip:?}"), format!("{definition:?}"));
-    }
-
-    #[test]
-    fn rows_are_in_display_order() {
-        let scene = half_lit_scene(4, 4);
-        let block = Block {
-            x: 0,
-            y: 0,
-            width: 4,
-            height: 4,
-        };
-        let payload = payload(block, 0);
-        let top = render_block_row(&scene, &payload, 0);
-        let bottom = render_block_row(&scene, &payload, 3);
-        let lit = Color {
-            r: 1.0,
-            g: 2.0,
-            b: 3.0,
-        };
-        assert_eq!(top, vec![lit; 4]);
-        assert_eq!(bottom, vec![Color::default(); 4]);
-    }
-
-    #[test]
-    fn rendering_is_reproducible_and_seeded() {
-        let scene: Scene = decode_scene(
-            br#"{
-                "camera": {"origin": [0, 0, 0], "direction": [0, 0, -1], "width": 8, "height": 8},
-                "objects": [
-                    {"type": "sphere", "radius": 1, "position": [0, 3, -5], "emission": [5, 5, 5]},
-                    {"type": "sphere", "radius": 100, "position": [0, -101, -5]}
-                ]
-            }"#,
-        )
-        .unwrap()
-        .into();
-        let render = |seed| render_block_row(&scene, &payload(BLOCK, seed), 0);
-
-        assert_eq!(render(1), render(1));
-        assert_ne!(render(1), render(2));
-    }
-
-    #[test]
-    fn row_streams_are_distinct() {
-        // Includes the seed/position pairs a naive `seed ^ y` or `seed + x`
-        // scheme would map to the same stream.
-        let mut seeds = std::collections::HashSet::new();
-        for seed in 0..8 {
-            for x in 0..8 {
-                for y in 0..8 {
-                    assert!(seeds.insert(row_seed(seed, x, y)), "{seed} {x} {y}");
-                }
-            }
-        }
-    }
-}
+mod tests;
