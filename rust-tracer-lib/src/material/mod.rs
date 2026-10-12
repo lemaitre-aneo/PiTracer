@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{Hit, UnitVector};
@@ -11,7 +11,7 @@ pub use dielectric::*;
 pub use lambertian::*;
 pub use metal::*;
 
-pub trait Material<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
+pub trait Material<R: crate::Rng + ?Sized = dyn Rng>: std::fmt::Debug {
     /// Samples the outgoing direction of a ray scattering at `hit`; `None`
     /// means the ray is absorbed.
     fn scatter(&self, direction: UnitVector, hit: Hit, rng: &mut R) -> Option<UnitVector>;

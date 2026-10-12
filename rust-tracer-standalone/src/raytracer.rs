@@ -15,8 +15,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use rand::{Rng as _, SeedableRng};
 use rayon::prelude::*;
 use raytracer::{Color, Scene};
 use sdl2::event::EventSender;
@@ -122,7 +122,7 @@ pub fn render_thread(scene: Arc<Scene>, control: Arc<Control>, sender: EventSend
     let height = scene.camera.height as usize;
     // Per-(iteration, row) rngs are seeded through SplitMix (`seed_from_u64`),
     // never from raw constant state; see the test-suite seeding convention.
-    let seed_base = rand::rngs::StdRng::from_os_rng().random::<u64>();
+    let seed_base = rand::random::<u64>();
 
     let mut radiance = vec![0f32; width * 3 * height];
 
@@ -173,7 +173,7 @@ pub fn render_thread(scene: Arc<Scene>, control: Arc<Control>, sender: EventSend
 pub fn render_frame(scene: &Scene) -> Vec<f32> {
     let width = scene.camera.width as usize;
     let height = scene.camera.height as usize;
-    let seed_base = rand::rngs::StdRng::from_os_rng().random::<u64>();
+    let seed_base = rand::random::<u64>();
     // Never stopped.
     let control = Control::new();
     let mut radiance = vec![0f32; width * 3 * height];

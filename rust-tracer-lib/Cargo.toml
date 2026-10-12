@@ -6,7 +6,8 @@ edition = "2024"
 [features]
 compute = []
 # Open Image Denoise (`Denoiser`): a native library, found through OIDN_DIR
-# (shell.nix, Dockerfile).
+# (shell.nix, Dockerfile), or downloaded when a dependent turns on oidn's
+# `bundled` feature (rust-tracer-standalone).
 denoise = ["dep:oidn"]
 # Text in SVG images: laid out with the system's fonts and the fonts a
 # texture lists, then turned into paths when the image is loaded, so that
@@ -14,18 +15,16 @@ denoise = ["dep:oidn"]
 svg-text = ["usvg/text", "usvg/system-fonts"]
 
 [dependencies]
-rand = "0.9"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 fastnoise-lite = "1"
-# Pinned to the Open Image Denoise version it links against (shell.nix,
-# rust-tracer-worker/Dockerfile): the crate's versions track the library's.
-oidn = { version = "=2.4.1", optional = true }
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+oidn = { workspace = true, optional = true }
+image = { workspace = true, features = ["gif", "webp"] }
 base64 = "0.23.1"
 # `writer`: SVGs are made self-contained when loaded (text as paths, image
 # files embedded) by writing them back.
 usvg = { version = "0.48.1", default-features = false, features = ["writer"] }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile.workspace = true

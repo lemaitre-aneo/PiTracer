@@ -614,7 +614,7 @@ async fn failures_are_reported_in_the_output() {
 /// Noisy blocks of a uniform 0.4 grey over the scene's 16x12 image: the
 /// 96-pixel halo makes any block's tile the whole image.
 fn noisy_grid() -> Vec<BlockResult> {
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     let mut rng = rand::rngs::SmallRng::seed_from_u64(3);
     tile_grid(16, 12, 8, 6)
         .into_iter()

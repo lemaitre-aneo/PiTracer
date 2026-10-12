@@ -55,9 +55,9 @@ pub fn select<T>(cond: bool, then: T, otherwise: T) -> T {
 }
 
 /// RNG bound used by all the behavior traits: sealed so that both the
-/// concrete RNGs (fast, monomorphized) and `dyn RngCore` (object-safe
+/// concrete RNGs (fast, monomorphized) and `dyn rand::Rng` (object-safe
 /// default) satisfy it, and nothing else can.
-pub trait Rng: rand::RngCore + sealed::Sealed {}
+pub trait Rng: rand::Rng + sealed::Sealed {}
 
 mod sealed {
     pub trait Sealed {}
@@ -65,7 +65,7 @@ mod sealed {
     impl Sealed for rand::rngs::SmallRng {}
     impl Sealed for rand::rngs::StdRng {}
     impl Sealed for rand::rngs::ThreadRng {}
-    impl Sealed for dyn rand::RngCore {}
+    impl Sealed for dyn rand::Rng {}
 }
 
-impl<R: rand::RngCore + sealed::Sealed + ?Sized> Rng for R {}
+impl<R: rand::Rng + sealed::Sealed + ?Sized> Rng for R {}

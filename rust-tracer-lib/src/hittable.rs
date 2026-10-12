@@ -1,4 +1,4 @@
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
 /// Union of the three behavior traits a scene object provides. Blanket
 /// implemented for anything satisfying all three; `Scene` stores objects as
 /// `Arc<dyn Hittable>`.
-pub trait Hittable<R: crate::Rng + ?Sized = dyn RngCore>:
+pub trait Hittable<R: crate::Rng + ?Sized = dyn Rng>:
     Geometry<R> + Material<R> + Texture<R> + std::fmt::Debug
 {
 }
@@ -61,7 +61,7 @@ impl<G: Geometry, M: std::fmt::Debug, T: Texture> Geometry for Object<G, M, T> {
         &'a self,
         origin: Vector,
         direction: UnitVector,
-        rng: &'b mut (dyn RngCore + 'static),
+        rng: &'b mut (dyn Rng + 'static),
     ) -> Option<(f32, &'a dyn HitCaster)> {
         let (mut distance, mut caster) = self.geometry.hit(origin, direction, rng)?;
         if !self.texture.transparent() {
@@ -84,7 +84,7 @@ impl<G: Geometry, M: std::fmt::Debug, T: Texture> Geometry for Object<G, M, T> {
         self.geometry.to_hit(origin, direction, distance)
     }
 
-    fn target_random(&self, origin: Vector, rng: &mut (dyn RngCore + 'static)) -> UnitVector {
+    fn target_random(&self, origin: Vector, rng: &mut (dyn Rng + 'static)) -> UnitVector {
         self.geometry.target_random(origin, rng)
     }
 

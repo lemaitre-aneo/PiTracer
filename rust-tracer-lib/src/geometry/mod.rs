@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{Material, Texture, UnitVector, Vector};
@@ -92,7 +92,7 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for GeometryEnum {
 
 /// Leaf geometry: `hit` returns a bare distance. The blanket impls below lift
 /// any primitive to [`Geometry`] and [`HitCaster`] (a leaf is its own caster).
-pub(crate) trait GeometryPrimitive<R: crate::Rng + ?Sized = dyn RngCore>:
+pub(crate) trait GeometryPrimitive<R: crate::Rng + ?Sized = dyn Rng>:
     std::fmt::Debug
 {
     fn hit(&self, origin: Vector, direction: UnitVector, rng: &mut R) -> Option<f32>;
@@ -114,7 +114,7 @@ pub(crate) trait GeometryPrimitive<R: crate::Rng + ?Sized = dyn RngCore>:
 /// texture on the winner only. `target_random`/`target_pdf` are the
 /// solid-angle light-sampling pair; the defaults (constant direction, pdf 0)
 /// suit geometry that is never used as a light target.
-pub trait Geometry<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
+pub trait Geometry<R: crate::Rng + ?Sized = dyn Rng>: std::fmt::Debug {
     fn hit<'a>(
         &'a self,
         origin: Vector,
@@ -169,7 +169,7 @@ impl Hit {
 /// object's components; composite geometry whose material varies across its
 /// surface (per-face meshes, CSG, a BVH returning a child leaf) overrides
 /// them so the winner supplies its own.
-pub trait HitCaster<R: crate::Rng + ?Sized = dyn RngCore>: std::fmt::Debug {
+pub trait HitCaster<R: crate::Rng + ?Sized = dyn Rng>: std::fmt::Debug {
     fn as_geometry(&self) -> &dyn Geometry<R>;
     fn as_material<'a>(&'a self, default: &'a dyn Material<R>) -> &'a dyn Material<R> {
         default

@@ -5,24 +5,27 @@ edition = "2024"
 
 [features]
 default = ["denoise"]
-# Noise reduction of the displayed image (Open Image Denoise, a native
-# library found through OIDN_DIR; shell.nix provides it). Toggled with D.
-denoise = ["raytracer/denoise"]
+# Noise reduction of the displayed image (Open Image Denoise). Toggled with D.
+# The library is downloaded at build time (`bundled`) and lands next to the
+# binary in target/<profile>/; `cargo run` finds it there.
+denoise = ["raytracer/denoise", "dep:oidn"]
 
 [dependencies]
-raytracer = { path = "../rust-tracer-lib", package = "rust-tracer-lib", features = ["svg-text"] }
-sdl2 = "0.38"
+raytracer = { workspace = true, features = ["svg-text"] }
+sdl2.workspace = true
 
 
-clap = { version = "4.5", features = ["derive"] }
-eyre = "0.6"
-tracing = { version = "0.1", features = ["log"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-mimalloc = { version = "0.1", features = ["v3"] }
-rayon = "1.11.0"
-rand = "0.9"
-config = "0.15"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+clap.workspace = true
+eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+mimalloc.workspace = true
+rayon.workspace = true
+rand.workspace = true
+config.workspace = true
+image.workspace = true
+# Only here to turn on `bundled` for the copy that rust-tracer-lib uses.
+oidn = { workspace = true, optional = true, features = ["bundled"] }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile.workspace = true

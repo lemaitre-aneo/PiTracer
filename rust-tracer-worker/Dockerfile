@@ -7,12 +7,12 @@
 # target, so no emulation is involved; the final stage only copies files.
 
 # renovate: datasource=github-releases depName=RenderKit/oidn
-ARG OIDN_VERSION=2.4.1
+ARG OIDN_VERSION=2.5.1
 
 # Open Image Denoise for amd64: Intel's binary package.
 FROM --platform=${BUILDPLATFORM:-linux} debian:trixie-slim AS oidn-amd64
 ARG OIDN_VERSION
-ARG OIDN_X86_64_LINUX_SHA256=b69ca2443a226ef692ca46bdc4f89995b1e99091f2665b906cbe07e9673e48cc
+ARG OIDN_X86_64_LINUX_SHA256=743c3e2aff8c220d5d70fe6cb970fb3d36f2702d2693c61d1d148e404cf37cd6
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
 RUN curl -fsSL -o oidn.tar.gz "https://github.com/RenderKit/oidn/releases/download/v${OIDN_VERSION}/oidn-${OIDN_VERSION}.x86_64.linux.tar.gz" && \
     echo "${OIDN_X86_64_LINUX_SHA256}  oidn.tar.gz" | sha256sum -c && \
@@ -24,7 +24,7 @@ RUN curl -fsSL -o oidn.tar.gz "https://github.com/RenderKit/oidn/releases/downlo
 # OIDN computes itself, overriding CMAKE_INSTALL_RPATH).
 FROM --platform=${BUILDPLATFORM:-linux} debian:trixie-slim AS oidn-arm64
 ARG OIDN_VERSION
-ARG OIDN_SRC_SHA256=9c7c77ae0d57e004479cddb7aaafd405c2cc745153bed4805413c21be610e17b
+ARG OIDN_SRC_SHA256=e71fd043a70f1cc80e301d1b90df6c1f536098c4dd94baa612742f6db3369c36
 # renovate: datasource=github-releases depName=ispc/ispc
 ARG ISPC_VERSION=1.31.0
 ARG ISPC_LINUX_SHA256=d74089c835e10fd7e2c4b9225ced38b87d1fb53d35c7ceabd48cdf035da11b11

@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_utils::{assert_close, assert_stat_close, rng, seeds};
-use rand::Rng;
+use rand::RngExt;
 
 fn svg(body: &str) -> Svg {
     Svg::parse(

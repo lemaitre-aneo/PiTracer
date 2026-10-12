@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{GeometryPrimitive, Hit, UnitVector, Vector, select};
@@ -204,7 +204,7 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Ellipse {
 
 #[cfg(test)]
 mod test {
-    use rand::RngCore;
+    use rand::Rng;
 
     use super::*;
     use crate::test_utils::{
@@ -291,7 +291,7 @@ mod test {
         // approaching from z < 5 travels along +Z, against the grain: back face
         let origin = Vector::from((1f32, -1f32, 0f32));
         let t = ellipse.hit(origin, UnitVector::Z).expect("must hit");
-        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&ellipse, origin, UnitVector::Z, t);
+        let hit = GeometryPrimitive::<dyn Rng>::to_hit(&ellipse, origin, UnitVector::Z, t);
         assert!(!hit.front);
         assert_vec_close(hit.point, Vector::from((1f32, -1f32, 5f32)), 1e-6);
         assert_vec_close(
@@ -308,7 +308,7 @@ mod test {
         // approaching from z > 5: front face, normal +Z, still opposing
         let origin = Vector::from((1f32, -1f32, 10f32));
         let t = ellipse.hit(origin, -UnitVector::Z).expect("must hit");
-        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&ellipse, origin, -UnitVector::Z, t);
+        let hit = GeometryPrimitive::<dyn Rng>::to_hit(&ellipse, origin, -UnitVector::Z, t);
         assert!(hit.front);
         assert_vec_close(
             Vector::from(hit.normal),
@@ -326,7 +326,7 @@ mod test {
         let origin = Vector::from((5f32, -3f32, 4f32));
         let direction = (aim - origin).normalized();
         let t = ellipse.hit(origin, direction).expect("must hit");
-        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&ellipse, origin, direction, t);
+        let hit = GeometryPrimitive::<dyn Rng>::to_hit(&ellipse, origin, direction, t);
         assert_vec_close(hit.point, aim, 1e-5);
         assert_close(hit.u, 0.3f32, 1e-5);
         assert_close(hit.v, 0.6f32, 1e-5);
@@ -368,7 +368,7 @@ mod test {
             let origin = aim + 40f32 * ellipse.normal + 0.1f32 * ellipse.u;
             let direction = (aim - origin).normalized();
             let t = ellipse.hit(origin, direction).expect("must hit");
-            let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&ellipse, origin, direction, t);
+            let hit = GeometryPrimitive::<dyn Rng>::to_hit(&ellipse, origin, direction, t);
 
             let mut directions = vec![hit.normal];
             for angle in [30f64, 60f64, 85f64, 89.9f64, 89.99f64] {
@@ -427,7 +427,7 @@ mod test {
                 let Some(t) = ellipse.hit(origin, direction) else {
                     continue; // lateral jitter may push the aim off the disk
                 };
-                let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&ellipse, origin, direction, t);
+                let hit = GeometryPrimitive::<dyn Rng>::to_hit(&ellipse, origin, direction, t);
 
                 assert!(hit.offset > 0f32);
                 assert!(

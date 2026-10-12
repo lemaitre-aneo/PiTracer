@@ -30,17 +30,22 @@ impl Denoiser {
         height: usize,
     ) -> Result<(), DenoiseError> {
         let mut device = self.device.lock().unwrap_or_else(PoisonError::into_inner);
-        let device = device.get_or_insert_with(oidn::Device::cpu);
-        oidn::RayTracing::new(device)
+        // A failed creation is not kept: the next call tries again.
+        if device.is_none() {
+            let created = oidn::Device::cpu().map_err(|err| {
+                DenoiseError(format!("OIDN could not create a CPU device: {err}"))
+            })?;
+            *device = Some(created);
+        }
+        let device = device.as_ref().expect("created above");
+        // The crate checks the device's error after running the filter.
+        oidn::RayTracing::try_new(device)
+            .map_err(|err| DenoiseError(format!("OIDN could not create a filter: {err}")))?
             .hdr(true)
             .input_scale(1.0)
             .image_dimensions(width, height)
             .filter_in_place(color)
-            .map_err(|err| DenoiseError(format!("OIDN could not filter: {err:?}")))?;
-        // The crate does not check the device after running the filter.
-        device
-            .get_error()
-            .map_err(|(err, message)| DenoiseError(format!("OIDN failed: {err:?}: {message}")))
+            .map_err(|err| DenoiseError(format!("OIDN could not filter: {err}")))
     }
 }
 
@@ -60,7 +65,7 @@ impl std::error::Error for DenoiseError {}
 mod tests {
     use std::ffi::CStr;
 
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
 
     use super::*;
 

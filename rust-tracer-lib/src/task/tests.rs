@@ -1,4 +1,4 @@
-use rand::Rng as _;
+use rand::RngExt as _;
 
 use super::*;
 use crate::test_utils::{Stats, assert_stat_close, rng};

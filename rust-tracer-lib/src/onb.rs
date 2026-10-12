@@ -88,7 +88,7 @@ mod test {
     /// space after being derived in the local frame.
     #[test]
     fn transform_is_isometry() {
-        use rand::Rng as _;
+        use rand::RngExt as _;
 
         let mut rng = rng(seeds()[1]);
         for _ in 0..1000 {

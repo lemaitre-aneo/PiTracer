@@ -385,7 +385,7 @@ pub fn main() -> Result<(), eyre::Report> {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng as _;
+    use rand::RngExt as _;
     use rand::SeedableRng;
 
     fn scene(light_sampling: bool) -> ::raytracer::Scene {

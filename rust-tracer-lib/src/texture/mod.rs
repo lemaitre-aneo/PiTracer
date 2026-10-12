@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{Color, Hit};
@@ -11,7 +11,7 @@ pub use self::image::{DecodeError, Image, ImageError, SvgError};
 pub use flat::*;
 pub use marble::*;
 
-pub trait Texture<R: RngCore + ?Sized = dyn RngCore>: std::fmt::Debug {
+pub trait Texture<R: Rng + ?Sized = dyn Rng>: std::fmt::Debug {
     fn get(&self, hit: Hit, rng: &mut R) -> TextureProperty;
 
     /// Whether the surface can be transparent anywhere: when false,

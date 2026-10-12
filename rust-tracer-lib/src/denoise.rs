@@ -20,7 +20,7 @@ pub const TASK_TYPE_OPTION: &str = "taskType";
 
 /// Pixels of context a denoising tile needs on each side of its block:
 /// Open Image Denoise's `tileOverlap`, half its 174-pixel receptive field
-/// rounded up to [`DENOISE_ALIGNMENT`] (`core/unet_filter.cpp`, OIDN 2.4.1;
+/// rounded up to [`DENOISE_ALIGNMENT`] (`core/unet_filter.cpp`, OIDN 2.5.1;
 /// the worker's tests check it against the linked library).
 pub const DENOISE_HALO: u32 = 96;
 /// Tile offsets and sizes OIDN wants multiples of (`tileAlignment`): block

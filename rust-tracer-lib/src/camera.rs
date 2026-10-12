@@ -216,7 +216,7 @@ mod test {
 
     #[test]
     fn rays_are_normalized_and_continuous() {
-        use rand::Rng as _;
+        use rand::RngExt as _;
 
         let camera = camera(90f32);
         let mut rng = rng(seeds()[0]);

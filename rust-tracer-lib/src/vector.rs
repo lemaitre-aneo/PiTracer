@@ -259,7 +259,7 @@ impl UnitVector {
     }
     /// Uniform on the sphere: rejection-sample the unit ball (excluding tiny
     /// norms whose normalization would amplify component noise), normalize.
-    pub fn random<R: rand::Rng + ?Sized>(rng: &mut R) -> UnitVector {
+    pub fn random<R: rand::RngExt + ?Sized>(rng: &mut R) -> UnitVector {
         loop {
             let v = Vector {
                 x: rng.random(),
@@ -273,7 +273,10 @@ impl UnitVector {
             }
         }
     }
-    pub fn random_hemisphere<R: rand::Rng + ?Sized>(normal: UnitVector, rng: &mut R) -> UnitVector {
+    pub fn random_hemisphere<R: rand::RngExt + ?Sized>(
+        normal: UnitVector,
+        rng: &mut R,
+    ) -> UnitVector {
         let vec = Self::random(rng);
         crate::select(vec.dot(normal) > 0f32, vec, -vec)
     }
@@ -281,7 +284,7 @@ impl UnitVector {
     /// Cosine-weighted direction around local +z, p(w) = cos(theta)/pi: a
     /// uniform point on the unit disk (r = sqrt(r2)) lifted onto the
     /// hemisphere (z = sqrt(1 - r^2)).
-    pub fn random_cosine_local<R: rand::Rng + ?Sized>(rng: &mut R) -> UnitVector {
+    pub fn random_cosine_local<R: rand::RngExt + ?Sized>(rng: &mut R) -> UnitVector {
         let r1 = rng.random::<f32>();
         let r2 = rng.random::<f32>();
         let r2_sqrt = r2.sqrt();
@@ -296,14 +299,14 @@ impl UnitVector {
 
     /// [`random_cosine_local`](Self::random_cosine_local) rotated so local +z
     /// lands on `normal`.
-    pub fn random_cosine<R: rand::Rng + ?Sized>(normal: UnitVector, rng: &mut R) -> UnitVector {
+    pub fn random_cosine<R: rand::RngExt + ?Sized>(normal: UnitVector, rng: &mut R) -> UnitVector {
         UnitVector(Onb::new(normal).transform(UnitVector::random_cosine_local(rng).0))
     }
 }
 
 #[cfg(test)]
 mod test {
-    use rand::Rng as _;
+    use rand::RngExt as _;
     use rand::rngs::SmallRng;
 
     use super::*;

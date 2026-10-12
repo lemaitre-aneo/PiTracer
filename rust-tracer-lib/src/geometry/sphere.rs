@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{GeometryPrimitive, Hit, Onb, UnitVector, Vector, select};
@@ -145,7 +145,7 @@ impl Sphere {
 
 #[cfg(test)]
 mod test {
-    use rand::{RngCore, SeedableRng};
+    use rand::{Rng, SeedableRng};
 
     use super::*;
     #[test]
@@ -194,7 +194,7 @@ mod test {
         let direction = Vector::splat(1f32).normalized();
 
         let distance = sphere.hit(origin, direction).expect("Must hit");
-        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, distance);
+        let hit = GeometryPrimitive::<dyn Rng>::to_hit(&sphere, origin, direction, distance);
 
         eprintln!("{hit:?}");
     }
@@ -276,7 +276,7 @@ mod test {
         // from outside
         let origin = Vector::default();
         let t = sphere.hit(origin, direction).expect("must hit");
-        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, t);
+        let hit = GeometryPrimitive::<dyn Rng>::to_hit(&sphere, origin, direction, t);
         assert!(hit.front);
         assert_vec_close(hit.point, Vector::from((0f32, 0f32, 3f32)), 1e-6);
         assert_vec_close(
@@ -291,7 +291,7 @@ mod test {
         // from inside: back face, normal flipped inward, still opposing
         let origin = Vector::from((0f32, 0f32, 4f32));
         let t = sphere.hit(origin, direction).expect("must hit");
-        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, t);
+        let hit = GeometryPrimitive::<dyn Rng>::to_hit(&sphere, origin, direction, t);
         assert!(!hit.front);
         assert_vec_close(hit.point, Vector::from((0f32, 0f32, 7f32)), 1e-6);
         assert_vec_close(
@@ -358,7 +358,7 @@ mod test {
         let direction = UnitVector::X;
 
         let t = sphere.hit(origin, direction).expect("must enter");
-        let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, t);
+        let hit = GeometryPrimitive::<dyn Rng>::to_hit(&sphere, origin, direction, t);
         assert!(hit.front);
 
         // straight-through transmission: spawn on the inside
@@ -385,7 +385,7 @@ mod test {
             let axis = Vector::from((1f32, 2f32, 3f32)).normalized();
             let origin = sphere.position + (1.5f32 * radius + 100f32) * axis;
             let t = sphere.hit(origin, -axis).expect("must hit");
-            let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, -axis, t);
+            let hit = GeometryPrimitive::<dyn Rng>::to_hit(&sphere, origin, -axis, t);
 
             let mut directions = vec![hit.normal];
             for angle in [30f64, 60f64, 85f64, 89.9f64, 89.99f64] {
@@ -425,7 +425,7 @@ mod test {
                 let aim = sphere.position + (0.3f32 * radius) * UnitVector::random(&mut rng);
                 let direction = (aim - origin).normalized();
                 let t = sphere.hit(origin, direction).expect("must hit");
-                let hit = GeometryPrimitive::<dyn RngCore>::to_hit(&sphere, origin, direction, t);
+                let hit = GeometryPrimitive::<dyn Rng>::to_hit(&sphere, origin, direction, t);
 
                 assert!(hit.offset > 0f32);
                 assert!(

@@ -89,7 +89,7 @@ impl<R: crate::Rng + ?Sized> Texture<R> for Marble {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng as _;
+    use rand::RngExt as _;
 
     use super::*;
     use crate::UnitVector;

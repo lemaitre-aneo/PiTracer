@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::Rng;
 
 use super::*;
 use crate::test_utils::{assert_close, assert_stat_close, png, rng, seeds};
@@ -21,11 +21,11 @@ fn image(width: u32, height: u32, texels: &[[u8; 4]]) -> Image {
 }
 
 fn attenuation(image: &Image, u: f32, v: f32) -> Color {
-    Texture::<dyn RngCore>::get(image, hit_at(u, v), &mut rng(seeds()[0])).attenuation
+    Texture::<dyn Rng>::get(image, hit_at(u, v), &mut rng(seeds()[0])).attenuation
 }
 
 fn opacity(image: &Image, u: f32, v: f32) -> f32 {
-    Texture::<dyn RngCore>::opacity(image, &hit_at(u, v))
+    Texture::<dyn Rng>::opacity(image, &hit_at(u, v))
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn the_image_covers_the_unit_square_top_row_up() {
 fn transparent_texels_do_not_bleed_their_color() {
     // Opaque white next to a transparent black texel.
     let image = image(2, 1, &[[255, 255, 255, 255], [0, 0, 0, 0]]);
-    assert!(Texture::<dyn RngCore>::transparent(&image));
+    assert!(Texture::<dyn Rng>::transparent(&image));
     // Halfway: half covered, and what covers it is white.
     assert_close(opacity(&image, 0.5, 0.5), 0.5, 1e-6);
     assert_eq!(
@@ -103,9 +103,9 @@ fn transparent_texels_do_not_bleed_their_color() {
 #[test]
 fn opaque_images_are_not_transparent() {
     let image = image(1, 1, &[[10, 20, 30, 255]]);
-    assert!(!Texture::<dyn RngCore>::transparent(&image));
+    assert!(!Texture::<dyn Rng>::transparent(&image));
     // Unloaded: black and opaque.
-    assert!(!Texture::<dyn RngCore>::transparent(&Image::default()));
+    assert!(!Texture::<dyn Rng>::transparent(&Image::default()));
     assert_eq!(attenuation(&Image::default(), 0.5, 0.5), Color::default());
 }
 
