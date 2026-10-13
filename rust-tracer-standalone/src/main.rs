@@ -76,6 +76,10 @@ pub struct Cli {
     /// (D still toggles it)
     #[arg(long)]
     pub no_denoise: bool,
+
+    /// Device that runs the noise reduction
+    #[arg(long, value_enum, default_value_t)]
+    pub denoise_device: denoiser::Device,
 }
 
 fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
@@ -134,9 +138,14 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
     Ok(scene)
 }
 
-/// Renders one frame of `scene`, noise-reduced if `denoise` (and built
-/// with the `denoise` feature), into the image file at `path`.
-fn save(scene: &Scene, path: &std::path::Path, denoise: bool) -> Result<(), eyre::Report> {
+/// Renders one frame of `scene`, noise-reduced on `device` if `denoise` (and
+/// built with the `denoise` feature), into the image file at `path`.
+fn save(
+    scene: &Scene,
+    path: &std::path::Path,
+    denoise: bool,
+    #[allow(unused_variables)] device: denoiser::Device,
+) -> Result<(), eyre::Report> {
     let started = Instant::now();
     #[allow(unused_mut)]
     let mut radiance = crate::raytracer::render_frame(scene);
@@ -144,9 +153,20 @@ fn save(scene: &Scene, path: &std::path::Path, denoise: bool) -> Result<(), eyre
     let (width, height) = (scene.camera.width, scene.camera.height);
     if denoise {
         #[cfg(feature = "denoise")]
-        ::raytracer::Denoiser::default()
-            .denoise(&mut radiance, width as usize, height as usize)
-            .map_err(|err| eyre::eyre!("noise reduction failed: {err}"))?;
+        {
+            let started = Instant::now();
+            let denoiser = ::raytracer::Denoiser::new(device.into());
+            denoiser
+                .denoise(&mut radiance, width as usize, height as usize)
+                .map_err(|err| eyre::eyre!("noise reduction failed: {err}"))?;
+            let device = denoiser
+                .device()
+                .map_or("unknown".into(), |d| d.to_string());
+            tracing::info!(
+                "denoised on the {device} device in {:#?}",
+                started.elapsed()
+            );
+        }
         #[cfg(not(feature = "denoise"))]
         tracing::warn!(
             "built without the denoise feature: saving the image without noise reduction"
@@ -174,7 +194,7 @@ pub fn main() -> Result<(), eyre::Report> {
     let mut cli = Cli::parse();
     let scene = scene(&mut cli)?;
     if let Some(path) = &cli.save {
-        return save(&scene, path, !cli.no_denoise);
+        return save(&scene, path, !cli.no_denoise, cli.denoise_device);
     }
 
     let sdl = sdl2::init().map_err(eyre::Report::msg)?;
@@ -206,7 +226,8 @@ pub fn main() -> Result<(), eyre::Report> {
     if cli.no_denoise && display.enabled() {
         display.toggle();
     }
-    let denoise_thread = DenoiseThread::spawn(width, height, events.event_sender());
+    let denoise_thread =
+        DenoiseThread::spawn(width, height, cli.denoise_device, events.event_sender());
     let mut paused = false;
     let title = |paused: bool, display: &Display| {
         let mut title = String::from("Rust Tracer");
@@ -424,7 +445,7 @@ objects:
         let scene = ::raytracer::Scene::from(definition);
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("render.png");
-        super::save(&scene, &path, false).unwrap();
+        super::save(&scene, &path, false, Default::default()).unwrap();
 
         let image = image::open(&path).unwrap().into_rgb8();
         assert_eq!(image.dimensions(), (4, 3));
@@ -432,7 +453,15 @@ objects:
         assert!(image.pixels().all(|pixel| pixel.0 == expected));
 
         // The format comes from the extension.
-        assert!(super::save(&scene, &folder.path().join("render.unknown"), false).is_err());
+        assert!(
+            super::save(
+                &scene,
+                &folder.path().join("render.unknown"),
+                false,
+                Default::default()
+            )
+            .is_err()
+        );
     }
 
     fn parse(yaml: &str) -> Result<::raytracer::SceneDefinition, config::ConfigError> {

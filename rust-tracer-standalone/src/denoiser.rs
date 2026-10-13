@@ -8,6 +8,37 @@ pub use imp::DenoiseThread;
 /// Whether noise reduction is built in.
 pub const AVAILABLE: bool = cfg!(feature = "denoise");
 
+/// The device that denoises (`--denoise-device`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Device {
+    /// A supported GPU if any, else the CPU
+    #[default]
+    Auto,
+    Cpu,
+    /// NVIDIA GPU
+    Cuda,
+    /// AMD GPU
+    Hip,
+    /// Intel GPU
+    Sycl,
+    /// Apple GPU
+    Metal,
+}
+
+#[cfg(feature = "denoise")]
+impl From<Device> for raytracer::DenoiseDevice {
+    fn from(device: Device) -> Self {
+        match device {
+            Device::Auto => Self::Auto,
+            Device::Cpu => Self::Cpu,
+            Device::Cuda => Self::Cuda,
+            Device::Hip => Self::Hip,
+            Device::Sycl => Self::Sycl,
+            Device::Metal => Self::Metal,
+        }
+    }
+}
+
 #[cfg(feature = "denoise")]
 mod imp {
     use std::sync::{Arc, Condvar, Mutex};
@@ -16,6 +47,7 @@ mod imp {
     use raytracer::Denoiser;
     use sdl2::event::EventSender;
 
+    use super::Device;
     use crate::display::{DenoiseRequest, Denoised};
     use crate::raytracer::ViewerEvent;
 
@@ -33,11 +65,11 @@ mod imp {
     }
 
     impl DenoiseThread {
-        pub fn spawn(width: usize, height: usize, sender: EventSender) -> Self {
+        pub fn spawn(width: usize, height: usize, device: Device, sender: EventSender) -> Self {
             let slot = Arc::new((Mutex::new(Slot::default()), Condvar::new()));
             let handle = std::thread::spawn({
                 let slot = slot.clone();
-                move || run(&slot, width, height, sender)
+                move || run(&slot, width, height, device, sender)
             });
             Self { slot, handle }
         }
@@ -60,9 +92,16 @@ mod imp {
         }
     }
 
-    fn run(slot: &(Mutex<Slot>, Condvar), width: usize, height: usize, sender: EventSender) {
+    fn run(
+        slot: &(Mutex<Slot>, Condvar),
+        width: usize,
+        height: usize,
+        device: Device,
+        sender: EventSender,
+    ) {
         let (slot, wake) = slot;
-        let denoiser = Denoiser::default();
+        let denoiser = Denoiser::new(device.into());
+        let mut first = true;
         loop {
             let request = {
                 let mut slot = slot.lock().unwrap();
@@ -81,6 +120,12 @@ mod imp {
             if let Err(err) = denoiser.denoise(&mut denoised, width, height) {
                 tracing::warn!("could not denoise frame #{}: {err}", request.iter);
                 continue;
+            }
+            if std::mem::take(&mut first) {
+                let device = denoiser
+                    .device()
+                    .map_or("unknown".into(), |d| d.to_string());
+                tracing::info!("denoising on the {device} device");
             }
             tracing::debug!(
                 "frame #{}: denoised in {:#?}",
@@ -103,12 +148,13 @@ mod imp {
 mod imp {
     use sdl2::event::EventSender;
 
+    use super::Device;
     use crate::display::DenoiseRequest;
 
     pub struct DenoiseThread;
 
     impl DenoiseThread {
-        pub fn spawn(_width: usize, _height: usize, _sender: EventSender) -> Self {
+        pub fn spawn(_width: usize, _height: usize, _device: Device, _sender: EventSender) -> Self {
             Self
         }
 

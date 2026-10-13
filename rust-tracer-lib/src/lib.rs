@@ -22,7 +22,7 @@ pub use geometry::*;
 pub use hittable::*;
 pub use material::*;
 #[cfg(feature = "denoise")]
-pub use oidn_filter::{DenoiseError, Denoiser};
+pub use oidn_filter::{DenoiseDevice, DenoiseError, Denoiser};
 pub use onb::*;
 pub use scene::*;
 pub use task::*;
