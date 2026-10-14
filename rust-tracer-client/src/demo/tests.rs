@@ -749,7 +749,7 @@ async fn renders_every_block_through(
         })
     ));
 
-    assert_eq!(fake.calls(), ["create", "close", "purge", "delete"]);
+    assert_eq!(fake.calls(), ["create", "close", "purge"]);
     // Every injected failure was hit, and recovered from.
     assert_eq!(
         fake.failing_downloads
@@ -931,7 +931,7 @@ async fn intermediate_images_show_progress() {
             render(&scene, &payload).to_display(&scene)
         );
     }
-    assert_eq!(fake.calls(), ["create", "cancel", "purge", "delete"]);
+    assert_eq!(fake.calls(), ["create", "cancel", "purge"]);
 }
 
 #[tokio::test]
@@ -961,7 +961,7 @@ async fn aborted_result_fails_and_cancels_the_session() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(fake.calls(), ["create", "cancel", "purge", "delete"]);
+    assert_eq!(fake.calls(), ["create", "cancel", "purge"]);
 }
 
 #[tokio::test]
@@ -986,7 +986,7 @@ async fn commands_pause_and_interrupt_the_run() {
     assert_eq!(end, RunEnd::Interrupted(Command::Quit));
     assert_eq!(
         fake.calls(),
-        ["create", "pause", "resume", "cancel", "purge", "delete"]
+        ["create", "pause", "resume", "cancel", "purge"]
     );
     // An interrupted run does not report an outcome.
     assert!(

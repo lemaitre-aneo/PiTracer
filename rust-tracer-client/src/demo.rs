@@ -265,22 +265,17 @@ async fn toggle_pause(pool: &Pool, session_id: &str, pause: bool) {
     }
 }
 
-/// Closes a completed session, cancels an abandoned one, then purges and
-/// deletes it (its results are no longer needed).
+/// Closes a completed session, cancels an abandoned one, then purges it (its
+/// results are no longer needed). The session itself is kept.
 async fn cleanup(pool: &Pool, session_id: &str, completed: bool) {
-    for step in [
-        if completed { "close" } else { "cancel" },
-        "purge",
-        "delete",
-    ] {
+    for step in [if completed { "close" } else { "cancel" }, "purge"] {
         // One pooled connection per request.
         let result = async {
             let mut sessions = pool.sessions().await?;
             match step {
                 "close" => sessions.close(session_id).await?,
                 "cancel" => sessions.cancel(session_id).await?,
-                "purge" => sessions.purge(session_id).await?,
-                _ => sessions.delete(session_id).await?,
+                _ => sessions.purge(session_id).await?,
             };
             Ok::<_, eyre::Report>(())
         };
