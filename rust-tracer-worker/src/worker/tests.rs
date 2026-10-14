@@ -201,7 +201,7 @@ impl Harness {
         );
         Self {
             agent,
-            worker: Arc::new(Worker::new(channel).unwrap()),
+            worker: Arc::new(Worker::new(channel, Arc::default()).unwrap()),
             folder,
         }
     }

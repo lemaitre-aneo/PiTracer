@@ -608,6 +608,7 @@ fn job() -> RenderJob {
         denoise: false,
         task_options: TaskOptions::default(),
         partitions: Vec::new(),
+        denoise_partition: None,
     }
 }
 
@@ -662,7 +663,17 @@ async fn renders_every_block_through(
     fake.failing_downloads
         .store(failing_downloads, std::sync::atomic::Ordering::Relaxed);
     let pool = serve_with(fake.clone(), pool).await;
-    let job = RenderJob { denoise, ..job() };
+    // Denoising on a partition of its own.
+    let job = RenderJob {
+        denoise,
+        task_options: TaskOptions {
+            partition_id: "cpu".into(),
+            ..Default::default()
+        },
+        partitions: vec!["cpu".into(), "gpu".into()],
+        denoise_partition: Some("gpu".into()),
+        ..job()
+    };
     let (events, mut received) = mpsc::unbounded_channel();
     let (_commands, mut commands) = mpsc::unbounded_channel();
 
@@ -760,6 +771,16 @@ async fn renders_every_block_through(
         denoising
             .iter()
             .all(|options| options.priority == raytracer::DENOISE_PRIORITY)
+    );
+    assert!(
+        rendering
+            .iter()
+            .all(|options| options.partition_id == "cpu")
+    );
+    assert!(
+        denoising
+            .iter()
+            .all(|options| options.partition_id == "gpu")
     );
 }
 

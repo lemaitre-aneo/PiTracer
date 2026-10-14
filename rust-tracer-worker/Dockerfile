@@ -5,6 +5,15 @@
 #
 # Every build stage runs on the build machine and cross-compiles for the
 # target, so no emulation is involved; the final stage only copies files.
+#
+# Denoising runs on an NVIDIA GPU when the container has one (DENOISE_DEVICE,
+# `auto` by default), else on the CPU. The image holds no CUDA library: OIDN's
+# CUDA device only needs the driver's libcuda.so.1, which the NVIDIA Container
+# Toolkit mounts in the containers given a GPU (in Kubernetes, a
+# `nvidia.com/gpu` limit). Its GPU code (sm_75, sm_80 and up, no PTX) runs on
+# Turing and newer GPUs, Jetson Orin (sm_87) included, with a CUDA 12 driver:
+# 525.60.13 or newer, or JetPack 6's (CUDA 12.2, which runs CUDA 12.9 code by
+# minor version compatibility), not JetPack 5's.
 
 # renovate: datasource=github-releases depName=RenderKit/oidn
 ARG OIDN_VERSION=2.5.1
@@ -21,19 +30,34 @@ RUN curl -fsSL -o oidn.tar.gz "https://github.com/RenderKit/oidn/releases/downlo
 # Open Image Denoise for arm64: there is no binary package for Linux arm64,
 # so it is cross-compiled from source (with Debian's TBB for arm64), in the
 # layout of Intel's packages (OIDN_ZIP_MODE: `$ORIGIN/../lib` RPATHs, which
-# OIDN computes itself, overriding CMAKE_INSTALL_RPATH).
-FROM --platform=${BUILDPLATFORM:-linux} debian:trixie-slim AS oidn-arm64
+# OIDN computes itself, overriding CMAKE_INSTALL_RPATH), with the CPU and the
+# CUDA devices. On bookworm: CUDA 12's math_functions.h conflicts with the
+# glibc 2.41 of trixie (cospi and sinpi now noexcept), which nvcc rejects;
+# libraries built against bookworm's glibc 2.36 run on the runtime image's.
+FROM --platform=${BUILDPLATFORM:-linux} debian:bookworm-slim AS oidn-arm64
 ARG OIDN_VERSION
 ARG OIDN_SRC_SHA256=e71fd043a70f1cc80e301d1b90df6c1f536098c4dd94baa612742f6db3369c36
 # renovate: datasource=github-releases depName=ispc/ispc
 ARG ISPC_VERSION=1.31.0
 ARG ISPC_LINUX_SHA256=d74089c835e10fd7e2c4b9225ced38b87d1fb53d35c7ceabd48cdf035da11b11
 ARG ISPC_LINUX_AARCH64_SHA256=660ccac47ff7e0980b89b00a3ebd70201acf55f9e816c127fc28e868ab456193
+# The CUDA toolkit, from NVIDIA's redistributable archives (versions and
+# hashes from https://developer.download.nvidia.com/compute/cuda/redist/redistrib_12.9.2.json):
+# nvcc for the build machine, and the headers and driver stub of arm64 servers
+# (sbsa), linking to the same libcuda.so.1 as Jetson's. CUDA 12.9 is the newest
+# that JetPack 6's driver runs (OIDN needs 12.8 or newer; 13.x needs JetPack 7).
+ARG CUDA_NVCC_VERSION=12.9.86
+ARG CUDA_NVCC_X86_64_SHA256=7a1a5b652e5ef85c82b721d10672fc9a2dbaab44e9bd3c65a69517bf53998c35
+ARG CUDA_NVCC_SBSA_SHA256=0aa1fce92dbae76c059c27eefb9d0ffb58e1291151e44ff7c7f1fc2dd9376c0d
+ARG CUDA_CUDART_VERSION=12.9.79
+ARG CUDA_CUDART_SBSA_SHA256=8b422a3b2cb8452cb678181b0bf9d7aa7342df168b5319c5488ae3b8514101fc
+ARG CUDA_CCCL_VERSION=12.9.27
+ARG CUDA_CCCL_SBSA_SHA256=8c3da24801b500f1d9217d191bb4b63e5d2096c8e7d0b7695e876853180ba82f
 ARG BUILDARCH
 RUN dpkg --add-architecture arm64 && \
     apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates cmake ninja-build python3 \
-        g++-aarch64-linux-gnu libtbb-dev:arm64
+    apt-get install -y --no-install-recommends curl ca-certificates xz-utils cmake ninja-build \
+        python3 g++-aarch64-linux-gnu libtbb-dev:arm64
 # ISPC for the build machine; it targets aarch64 from any host
 RUN case "${BUILDARCH:-$(dpkg --print-architecture)}" in \
         amd64) archive="ispc-v${ISPC_VERSION}-linux.tar.gz" sha="${ISPC_LINUX_SHA256}" ;; \
@@ -43,23 +67,55 @@ RUN case "${BUILDARCH:-$(dpkg --print-architecture)}" in \
     curl -fsSL -o ispc.tar.gz "https://github.com/ispc/ispc/releases/download/v${ISPC_VERSION}/${archive}" && \
     echo "${sha}  ispc.tar.gz" | sha256sum -c && \
     mkdir /opt/ispc && tar -xzf ispc.tar.gz --strip-components=1 -C /opt/ispc && rm ispc.tar.gz
+# The toolkit's layout: the build machine's nvcc at the top, the target's
+# files in targets/aarch64-linux, where nvcc looks for them (bin/nvcc.profile)
+# with --target-directory; the name that CMake 3.25 expects for aarch64.
+RUN base=https://developer.download.nvidia.com/compute/cuda/redist && \
+    case "${BUILDARCH:-$(dpkg --print-architecture)}" in \
+        amd64) host=x86_64 sha="${CUDA_NVCC_X86_64_SHA256}" ;; \
+        arm64) host=sbsa sha="${CUDA_NVCC_SBSA_SHA256}" ;; \
+        *) exit 1 ;; \
+    esac && \
+    fetch() { \
+        curl -fsSL -o "$1.tar.xz" "$base/$1/linux-$2/$1-linux-$2-$3-archive.tar.xz" && \
+        echo "$4  $1.tar.xz" | sha256sum -c ; \
+    } && \
+    target=/usr/local/cuda/targets/aarch64-linux && mkdir -p "$target" && \
+    fetch cuda_nvcc "$host" "${CUDA_NVCC_VERSION}" "$sha" && \
+    tar -xJf cuda_nvcc.tar.xz --strip-components=1 -C /usr/local/cuda && \
+    fetch cuda_nvcc sbsa "${CUDA_NVCC_VERSION}" "${CUDA_NVCC_SBSA_SHA256}" && \
+    tar -xJf cuda_nvcc.tar.xz --strip-components=1 -C "$target" --wildcards '*/include' && \
+    fetch cuda_cudart sbsa "${CUDA_CUDART_VERSION}" "${CUDA_CUDART_SBSA_SHA256}" && \
+    tar -xJf cuda_cudart.tar.xz --strip-components=1 -C "$target" && \
+    fetch cuda_cccl sbsa "${CUDA_CCCL_VERSION}" "${CUDA_CCCL_SBSA_SHA256}" && \
+    tar -xJf cuda_cccl.tar.xz --strip-components=1 -C "$target" && \
+    rm ./*.tar.xz
 RUN curl -fsSL -o oidn.tar.gz "https://github.com/RenderKit/oidn/releases/download/v${OIDN_VERSION}/oidn-${OIDN_VERSION}.src.tar.gz" && \
     echo "${OIDN_SRC_SHA256}  oidn.tar.gz" | sha256sum -c && \
     mkdir /src && tar -xzf oidn.tar.gz --strip-components=1 -C /src && rm oidn.tar.gz
+# A toolchain file: OIDN builds the CUDA device in a CMake project of its own,
+# which only gets the toolchain file and CUDAToolkit_ROOT.
+RUN printf '%s\n' \
+        'set(CMAKE_SYSTEM_NAME Linux)' \
+        'set(CMAKE_SYSTEM_PROCESSOR aarch64)' \
+        'set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)' \
+        'set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)' \
+        'set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)' \
+        'set(CMAKE_CUDA_HOST_COMPILER aarch64-linux-gnu-g++)' \
+        'set(CMAKE_CUDA_FLAGS_INIT "--target-directory aarch64-linux")' \
+        > /aarch64.cmake
 RUN cmake -S /src -B /build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/oidn \
         -DOIDN_ZIP_MODE=ON \
-        -DCMAKE_SYSTEM_NAME=Linux \
-        -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-        -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+        -DCMAKE_TOOLCHAIN_FILE=/aarch64.cmake \
+        -DCUDAToolkit_ROOT=/usr/local/cuda \
         -DTBB_DIR=/usr/lib/aarch64-linux-gnu/cmake/TBB \
         -DISPC_EXECUTABLE=/opt/ispc/bin/ispc \
         -DOIDN_APPS=OFF \
         -DOIDN_DEVICE_CPU=ON \
         -DOIDN_DEVICE_SYCL=OFF \
-        -DOIDN_DEVICE_CUDA=OFF \
+        -DOIDN_DEVICE_CUDA=ON \
         -DOIDN_DEVICE_HIP=OFF \
         -DOIDN_DEVICE_METAL=OFF && \
     cmake --build /build && \
@@ -127,15 +183,16 @@ RUN for member in rust-tracer-lib rust-tracer-worker rust-tracer-client rust-tra
 COPY rust-tracer-lib/src rust-tracer-lib/src
 COPY rust-tracer-worker/src rust-tracer-worker/src
 # Newer than the stubs' build, whatever the timestamps in the build context.
-# Only the OIDN libraries the CPU device needs (Intel's package also has the
-# GPU devices and their runtimes, some 60 MB), TBB included.
+# Only the OIDN libraries the CPU and CUDA devices need (Intel's package also
+# has the other GPU devices and their runtimes, some 60 MB), TBB included.
 RUN find rust-tracer-lib/src rust-tracer-worker/src -name '*.rs' -exec touch {} + && \
     cargo auditable build --release --locked -p rust-tracer-worker \
         --target "$(cat /rust-target)" && \
     mkdir -p /out/bin /out/lib && \
     mv "target/$(cat /rust-target)/release/rust-tracer-worker" /out/bin/ && \
     cp -a /oidn/lib/libOpenImageDenoise.so.* /oidn/lib/libOpenImageDenoise_core.so.* \
-        /oidn/lib/libOpenImageDenoise_device_cpu.so.* /oidn/lib/libtbb.so.12* /out/lib/
+        /oidn/lib/libOpenImageDenoise_device_cpu.so.* \
+        /oidn/lib/libOpenImageDenoise_device_cuda.so.* /oidn/lib/libtbb.so.12* /out/lib/
 
 # Like the ArmoniK.Core test workers: the base image's own non-root user, and
 # no shared folder in the image. The deployment mounts the folders shared with

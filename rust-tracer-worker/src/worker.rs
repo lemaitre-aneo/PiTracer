@@ -37,7 +37,10 @@ impl std::fmt::Debug for Worker {
 impl Worker {
     /// The agent connection is lazy: established on the first request, so
     /// the worker can start before the agent listens.
-    pub fn new(channel_config: crate::GrpcChannel) -> Result<Self, eyre::Report> {
+    pub fn new(
+        channel_config: crate::GrpcChannel,
+        denoiser: Arc<Denoiser>,
+    ) -> Result<Self, eyre::Report> {
         let channel = match channel_config.socket_type {
             crate::SocketType::Tcp => Endpoint::from_shared(channel_config.address)?.connect_lazy(),
             crate::SocketType::UnixDomainSocket => {
@@ -60,7 +63,7 @@ impl Worker {
         Ok(Self {
             agent: Agent::with_channel(channel),
             scene: Mutex::default(),
-            denoiser: Arc::default(),
+            denoiser,
         })
     }
 

@@ -44,6 +44,9 @@ pub struct RenderJob {
     pub task_options: TaskOptions,
     /// Partitions the session may use (empty: the default partition).
     pub partitions: Vec<String>,
+    /// Partition of the denoising tasks, if not that of `task_options`
+    /// (workers with a GPU, say).
+    pub denoise_partition: Option<String>,
 }
 
 /// What a run reports to the display.
@@ -511,6 +514,9 @@ async fn submit(
     // on those of its neighbourhood, so it starts as soon as they are done.
     TaskType::Denoising.to_options(&mut task_options.options);
     task_options.priority = DENOISE_PRIORITY;
+    if let Some(partition) = &job.denoise_partition {
+        task_options.partition_id = partition.clone();
+    }
     for blocks in job.blocks.chunks(BATCH_SIZE) {
         let outputs = by_name(
             pool.results()

@@ -62,6 +62,27 @@ impl std::fmt::Display for DenoiseDevice {
     }
 }
 
+impl std::str::FromStr for DenoiseDevice {
+    type Err = DenoiseError;
+
+    /// The lowercase names: `cpu`, `auto`, `cuda`, `hip`, `sycl`, `metal`.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Ok(match name {
+            "cpu" => Self::Cpu,
+            "auto" => Self::Auto,
+            "cuda" => Self::Cuda,
+            "hip" => Self::Hip,
+            "sycl" => Self::Sycl,
+            "metal" => Self::Metal,
+            _ => {
+                return Err(DenoiseError(format!(
+                    "unknown denoising device {name:?} (expected cpu, auto, cuda, hip, sycl or metal)"
+                )));
+            }
+        })
+    }
+}
+
 /// A lazily created OIDN device, of the kind given at construction (the CPU
 /// by default). Devices are costly to create, and not `Sync`: denoising
 /// calls are serialized, which costs nothing, since OIDN already spreads one
@@ -90,11 +111,36 @@ impl Denoiser {
         }
     }
 
-    /// The kind of the device, once created by a call to [`Self::denoise`]:
-    /// for [`DenoiseDevice::Auto`], the one OIDN picked.
+    /// The kind of the device, once created by a call to [`Self::denoise`]
+    /// or [`Self::init`]: for [`DenoiseDevice::Auto`], the one OIDN picked.
     pub fn device(&self) -> Option<DenoiseDevice> {
         let device = self.device.lock().unwrap_or_else(PoisonError::into_inner);
         device.as_ref().and_then(DenoiseDevice::of)
+    }
+
+    /// Creates the device now rather than on the first call, which it
+    /// would slow down (by seconds for a GPU), and returns its kind.
+    pub fn init(&self) -> Result<Option<DenoiseDevice>, DenoiseError> {
+        let mut device = self.device.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(DenoiseDevice::of(self.create(&mut device)?))
+    }
+
+    /// The device, created if need be. A failed creation is not kept: the
+    /// next call tries again.
+    fn create<'a>(
+        &self,
+        device: &'a mut Option<oidn::Device>,
+    ) -> Result<&'a oidn::Device, DenoiseError> {
+        if device.is_none() {
+            let created = self.kind.create().map_err(|err| {
+                DenoiseError(format!(
+                    "OIDN could not create a {} device: {err}",
+                    self.kind
+                ))
+            })?;
+            *device = Some(created);
+        }
+        Ok(device.as_ref().expect("created above"))
     }
 
     /// Denoises, in place, the `width` x `height` linear RGB image `color`
@@ -109,17 +155,7 @@ impl Denoiser {
         height: usize,
     ) -> Result<(), DenoiseError> {
         let mut device = self.device.lock().unwrap_or_else(PoisonError::into_inner);
-        // A failed creation is not kept: the next call tries again.
-        if device.is_none() {
-            let created = self.kind.create().map_err(|err| {
-                DenoiseError(format!(
-                    "OIDN could not create a {} device: {err}",
-                    self.kind
-                ))
-            })?;
-            *device = Some(created);
-        }
-        let device = device.as_ref().expect("created above");
+        let device = self.create(&mut device)?;
         // Device storage, copied to and from explicitly: the default storage
         // of GPU devices can be managed memory, which some platforms (WSL)
         // emulate, more than 20 times slower. On the CPU, it is host memory.
@@ -192,11 +228,29 @@ mod tests {
     fn automatic_device() {
         let denoiser = Denoiser::new(DenoiseDevice::Auto);
         assert_eq!(denoiser.device(), None);
+        let device = denoiser.init().unwrap();
+        assert_eq!(denoiser.device(), device);
         let mut color = vec![0.5f32; 16 * 16 * 3];
         denoiser.denoise(&mut color, 16, 16).unwrap();
         assert!(color.iter().all(|&c| (c - 0.5).abs() < 0.05), "{color:?}");
         let device = denoiser.device().expect("a known device");
         assert_ne!(device, DenoiseDevice::Auto);
+    }
+
+    #[test]
+    fn device_names() {
+        for device in [
+            DenoiseDevice::Cpu,
+            DenoiseDevice::Auto,
+            DenoiseDevice::Cuda,
+            DenoiseDevice::Hip,
+            DenoiseDevice::Sycl,
+            DenoiseDevice::Metal,
+        ] {
+            let name = format!("{device:?}").to_lowercase();
+            assert_eq!(name.parse(), Ok(device));
+        }
+        assert!("gpu".parse::<DenoiseDevice>().is_err());
     }
 
     #[test]

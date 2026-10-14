@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use armonik::reexports::{tokio_stream::wrappers::UnixListenerStream, tonic};
+use raytracer::{DenoiseDevice, Denoiser};
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tracing as _;
@@ -90,7 +91,20 @@ async fn main() -> Result<(), eyre::Report> {
 
     tracing::trace!("{conf:?}");
 
-    let worker = Arc::new(worker::Worker::new(conf.agent_channel)?);
+    let denoiser = Arc::new(Denoiser::new(denoise_device()?));
+    // The device is created in the background, so that the first denoising
+    // task need not wait for it (seconds for a GPU), and so that the logs
+    // tell early which one the worker got.
+    tokio::task::spawn_blocking({
+        let denoiser = denoiser.clone();
+        move || match denoiser.init() {
+            Ok(Some(device)) => tracing::info!("denoising on the {device} device"),
+            Ok(None) => tracing::info!("denoising on an unknown device"),
+            Err(err) => tracing::error!("no denoising device: {err}"),
+        }
+    });
+
+    let worker = Arc::new(worker::Worker::new(conf.agent_channel, denoiser)?);
 
     let router = tonic::transport::Server::builder().add_service(
         armonik::api::v3::worker::worker_server::WorkerServer::from_arc(worker.clone()),
@@ -144,6 +158,23 @@ async fn main() -> Result<(), eyre::Report> {
 
     Ok(())
 }
+
+/// The device that runs the denoising tasks, from [`DENOISE_DEVICE`]:
+/// `auto` by default, a GPU if the container has one, else the CPU.
+fn denoise_device() -> Result<DenoiseDevice, eyre::Report> {
+    match std::env::var(DENOISE_DEVICE) {
+        Ok(name) => name
+            .to_lowercase()
+            .parse()
+            .map_err(|err| eyre::eyre!("{DENOISE_DEVICE}: {err}")),
+        Err(std::env::VarError::NotPresent) => Ok(DenoiseDevice::Auto),
+        Err(err) => Err(eyre::eyre!("{DENOISE_DEVICE}: {err}")),
+    }
+}
+
+/// The environment variable that selects the denoising device: `auto`,
+/// `cpu`, `cuda`, `hip`, `sycl` or `metal`.
+const DENOISE_DEVICE: &str = "DENOISE_DEVICE";
 
 /// Socket address to listen on for a TCP channel address.
 async fn tcp_address(address: &str) -> Result<std::net::SocketAddr, eyre::Report> {

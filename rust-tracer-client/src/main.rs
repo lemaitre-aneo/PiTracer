@@ -104,6 +104,11 @@ pub struct Cli {
     #[arg(long)]
     pub partition: Option<String>,
 
+    /// Partition running the denoising tasks, such as one whose workers have
+    /// a GPU [default: --partition]
+    #[arg(long, requires = "partition")]
+    pub denoise_partition: Option<String>,
+
     /// Do not start a new render 30 s after one ends; wait for R instead
     #[arg(long)]
     pub no_auto_rerun: bool,
@@ -208,7 +213,13 @@ fn job(cli: &Cli) -> Result<RenderJob, eyre::Report> {
             partition_id: cli.partition.clone().unwrap_or_default(),
             ..Default::default()
         },
-        partitions: cli.partition.iter().cloned().collect(),
+        partitions: cli
+            .partition
+            .iter()
+            .chain(&cli.denoise_partition)
+            .cloned()
+            .collect(),
+        denoise_partition: cli.denoise_partition.clone(),
     })
 }
 
