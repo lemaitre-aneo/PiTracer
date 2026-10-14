@@ -223,6 +223,29 @@ fn job(cli: &Cli) -> Result<RenderJob, eyre::Report> {
     })
 }
 
+/// Resolves on the first SIGINT or SIGTERM (Ctrl-C on Windows). The handlers
+/// are registered by the call (within a runtime), not on the first poll.
+#[cfg(unix)]
+fn interrupted() -> std::io::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => (),
+            _ = terminate.recv() => (),
+        }
+    })
+}
+
+#[cfg(windows)]
+fn interrupted() -> std::io::Result<impl Future<Output = ()>> {
+    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+    Ok(async move {
+        ctrl_c.recv().await;
+    })
+}
+
 fn main() -> Result<(), eyre::Report> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -270,12 +293,27 @@ fn main() -> Result<(), eyre::Report> {
         Ok::<_, eyre::Report>(pool)
     })?;
 
+    // Ctrl-C (or SIGTERM) closes the window, so the session is cleaned up
+    // as on Esc. Registered now, so a signal can no longer kill the process
+    // once a session may exist, and before SDL, which must not take over.
+    let interrupted = {
+        let _runtime = runtime.enter();
+        interrupted().wrap_err("could not handle Ctrl-C")?
+    };
+    sdl2::hint::set("SDL_NO_SIGNAL_HANDLERS", "1");
     let sdl = sdl2::init().map_err(eyre::Report::msg)?;
     let sdl_events = sdl.event().map_err(eyre::Report::msg)?;
     sdl_events
         .register_custom_event::<RunEvent>()
         .map_err(eyre::Report::msg)?;
     let sender = sdl_events.event_sender();
+    let quit_sender = sdl_events.event_sender();
+    runtime.spawn(async move {
+        interrupted.await;
+        if let Err(err) = quit_sender.push_event(sdl2::event::Event::Quit { timestamp: 0 }) {
+            tracing::warn!("could not forward Ctrl-C to the window: {err}");
+        }
+    });
 
     let (commands, command_receiver) = tokio::sync::mpsc::unbounded_channel();
     let watcher = cli.watch.watcher(poll_interval);
