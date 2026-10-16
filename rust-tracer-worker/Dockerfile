@@ -10,10 +10,10 @@
 # `auto` by default), else on the CPU. The image holds no CUDA library: OIDN's
 # CUDA device only needs the driver's libcuda.so.1, which the NVIDIA Container
 # Toolkit mounts in the containers given a GPU (in Kubernetes, a
-# `nvidia.com/gpu` limit). Its GPU code (sm_75, sm_80 and up, no PTX) runs on
-# Turing and newer GPUs, Jetson Orin (sm_87) included, with a CUDA 12 driver:
-# 525.60.13 or newer, or JetPack 6's (CUDA 12.2, which runs CUDA 12.9 code by
-# minor version compatibility), not JetPack 5's.
+# `nvidia.com/gpu` limit). Its GPU code (sm_75, sm_80 and up, plus sm_87 on
+# arm64, no PTX) runs on Turing and newer GPUs and on Jetson Orin, with a
+# CUDA 12 driver: 525.60.13 or newer, or JetPack 6's (CUDA 12.2, which runs
+# CUDA 12.9 code by minor version compatibility), not JetPack 5's.
 
 # renovate: datasource=github-releases depName=RenderKit/oidn
 ARG OIDN_VERSION=2.5.1
@@ -93,6 +93,12 @@ RUN base=https://developer.download.nvidia.com/compute/cuda/redist && \
 RUN curl -fsSL -o oidn.tar.gz "https://github.com/RenderKit/oidn/releases/download/v${OIDN_VERSION}/oidn-${OIDN_VERSION}.src.tar.gz" && \
     echo "${OIDN_SRC_SHA256}  oidn.tar.gz" | sha256sum -c && \
     mkdir /src && tar -xzf oidn.tar.gz --strip-components=1 -C /src && rm oidn.tar.gz
+# OIDN builds sm_75, 80, 90, 100 and 120 only, and Jetson Orin (sm_87) cannot
+# load sm_80 code (CUDA_ERROR_INVALID_SOURCE: there is no binary compatibility
+# between desktop and Tegra GPUs): add sm_87 to both architecture lists.
+RUN sed -i -e 's/\(OIDN_CUDA_SM_FLAGS 75 80\) /\1 87 /' -e 's/\(OIDN_CUDA_SM80_FLAGS 80\) /\1 87 /' \
+        /src/devices/cuda/CMakeLists.txt && \
+    test "$(grep -c ' 80 87 ' /src/devices/cuda/CMakeLists.txt)" = 2
 # A toolchain file: OIDN builds the CUDA device in a CMake project of its own,
 # which only gets the toolchain file and CUDAToolkit_ROOT.
 RUN printf '%s\n' \
@@ -201,6 +207,11 @@ RUN find rust-tracer-lib/src rust-tracer-worker/src -name '*.rs' -exec touch {} 
 # as uid 5000 by default). The cc image adds the C/C++ runtime OIDN needs.
 FROM gcr.io/distroless/cc-debian13:nonroot
 COPY --from=build /out /app
+# Distroless has no ld.so.conf, so ldconfig ignores the drop-in that the NVIDIA
+# Container Toolkit (before 1.18.1) adds in ld.so.conf.d for the driver
+# libraries it mounts outside the default paths (Jetson's
+# /usr/lib/aarch64-linux-gnu/nvidia), and libcuda.so.1 is then not found.
+COPY rust-tracer-worker/ld.so.conf /etc/ld.so.conf
 # The worker logs nothing below `error` without a filter
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/bin/rust-tracer-worker"]
