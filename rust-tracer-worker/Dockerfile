@@ -214,5 +214,9 @@ COPY --from=build /out /app
 COPY rust-tracer-worker/ld.so.conf /etc/ld.so.conf
 # The worker logs nothing below `error` without a filter
 ENV RUST_LOG=info
+# Jetson's driver directory, found through the ld cache above in principle, but
+# not yet on our Jetson (to investigate). Elsewhere it does not exist, and the
+# loader skips it.
+ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/nvidia
 ENTRYPOINT ["/app/bin/rust-tracer-worker"]
 CMD []
