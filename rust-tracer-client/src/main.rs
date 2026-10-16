@@ -109,7 +109,8 @@ pub struct Cli {
     #[arg(long, requires = "partition")]
     pub denoise_partition: Option<String>,
 
-    /// Do not start a new render 30 s after one ends; wait for R instead
+    /// Do not start a new render 30 s after one ends; wait for R (or SIGUSR1)
+    /// instead
     #[arg(long)]
     pub no_auto_rerun: bool,
 
@@ -224,26 +225,45 @@ fn job(cli: &Cli) -> Result<RenderJob, eyre::Report> {
 }
 
 /// Resolves on the first SIGINT or SIGTERM (Ctrl-C on Windows). The handlers
-/// are registered by the call (within a runtime), not on the first poll.
+/// are registered by the call (within a runtime), not on the first poll; one
+/// that cannot be is logged, and its signal keeps its default action.
 #[cfg(unix)]
-fn interrupted() -> std::io::Result<impl Future<Output = ()>> {
+fn interrupted() -> impl Future<Output = ()> {
+    use futures::{StreamExt, stream::FuturesUnordered};
     use tokio::signal::unix::{SignalKind, signal};
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    Ok(async move {
-        tokio::select! {
-            _ = interrupt.recv() => (),
-            _ = terminate.recv() => (),
-        }
+    let mut signals: Vec<_> = [
+        (SignalKind::interrupt(), "SIGINT"),
+        (SignalKind::terminate(), "SIGTERM"),
+    ]
+    .into_iter()
+    .filter_map(|(kind, name)| {
+        signal(kind)
+            .inspect_err(|err| tracing::error!("could not handle {name}: {err}"))
+            .ok()
     })
+    .collect();
+    async move {
+        let mut received = signals
+            .iter_mut()
+            .map(|signal| signal.recv())
+            .collect::<FuturesUnordered<_>>();
+        // No handler at all: nothing will ever be received.
+        if received.next().await.is_none() {
+            std::future::pending().await
+        }
+    }
 }
 
 #[cfg(windows)]
-fn interrupted() -> std::io::Result<impl Future<Output = ()>> {
-    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
-    Ok(async move {
-        ctrl_c.recv().await;
-    })
+fn interrupted() -> impl Future<Output = ()> {
+    let ctrl_c = tokio::signal::windows::ctrl_c()
+        .inspect_err(|err| tracing::error!("could not handle Ctrl-C: {err}"));
+    async move {
+        match ctrl_c {
+            Ok(mut ctrl_c) => _ = ctrl_c.recv().await,
+            Err(_) => std::future::pending().await,
+        }
+    }
 }
 
 fn main() -> Result<(), eyre::Report> {
@@ -298,7 +318,7 @@ fn main() -> Result<(), eyre::Report> {
     // once a session may exist, and before SDL, which must not take over.
     let interrupted = {
         let _runtime = runtime.enter();
-        interrupted().wrap_err("could not handle Ctrl-C")?
+        interrupted()
     };
     sdl2::hint::set("SDL_NO_SIGNAL_HANDLERS", "1");
     let sdl = sdl2::init().map_err(eyre::Report::msg)?;
@@ -316,6 +336,30 @@ fn main() -> Result<(), eyre::Report> {
     });
 
     let (commands, command_receiver) = tokio::sync::mpsc::unbounded_channel();
+    // SIGUSR1 renders the scene file again, as R. Registered before the
+    // first session too: SIGUSR1 kills by default. Optional: R still works.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let rerun = {
+            let _runtime = runtime.enter();
+            signal(SignalKind::user_defined1())
+        };
+        match rerun {
+            Ok(mut rerun) => {
+                let commands = commands.clone();
+                runtime.spawn(async move {
+                    while rerun.recv().await.is_some() {
+                        tracing::info!("SIGUSR1: rendering again");
+                        if commands.send(Command::Rerun).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            Err(err) => tracing::error!("could not handle SIGUSR1: {err}"),
+        }
+    }
     let watcher = cli.watch.watcher(poll_interval);
     let rerun_delay = (!cli.no_auto_rerun).then_some(RERUN_DELAY);
     let demo = std::thread::spawn(move || {
