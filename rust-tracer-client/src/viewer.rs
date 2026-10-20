@@ -67,6 +67,7 @@ pub fn run(
     let mut scene_error = None;
 
     const PRESENT_INTERVAL: Duration = Duration::from_millis(15);
+    const REDRAW_INTERVAL: Duration = Duration::from_secs(1);
     let mut dirty = true;
     let mut title_dirty = true;
     let mut last_present = Instant::now() - PRESENT_INTERVAL;
@@ -177,6 +178,12 @@ pub fn run(
                 .set_title(&status.title(scene_error.as_deref()))
                 .map_err(eyre::Report::msg)?;
             title_dirty = false;
+        }
+
+        // Redraw at least once a second even without updates, so an idle
+        // window never goes stale (e.g. after being uncovered).
+        if last_present.elapsed() >= REDRAW_INTERVAL {
+            dirty = true;
         }
 
         if dirty && last_present.elapsed() >= PRESENT_INTERVAL {
