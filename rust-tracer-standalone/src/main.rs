@@ -346,6 +346,8 @@ pub fn main() -> Result<(), eyre::Report> {
                         _ => sdl2::video::FullscreenType::Off,
                     };
                     window.set_fullscreen(state).map_err(eyre::Report::msg)?;
+                    sdl.mouse()
+                        .show_cursor(matches!(state, sdl2::video::FullscreenType::Off));
                     dirty = true;
                 }
                 _ => {}
