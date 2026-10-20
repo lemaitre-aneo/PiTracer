@@ -98,15 +98,26 @@ const DOWNLOAD_ATTEMPTS: u32 = 3;
 /// hold the shutdown hostage.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Runs until a command quits, starting a new run `rerun_delay` after each
-/// one ends (or only on [`Command::Rerun`] without a delay). Every run after
-/// the first renders `reload()`, or the previous job again if it fails.
+/// Options shared by every run of the demo.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RunOptions {
+    /// How long to wait after a run ends before starting the next one; `None`
+    /// waits for a [`Command::Rerun`] instead.
+    pub rerun_delay: Option<Duration>,
+    /// Keep each session (purged) at the end of its run instead of deleting it.
+    pub keep_session: bool,
+}
+
+/// Runs until a command quits, starting a new run after
+/// [`RunOptions::rerun_delay`] (or only on [`Command::Rerun`] without a
+/// delay). Every run after the first renders `reload()`, or the previous job
+/// again if it fails.
 pub async fn demo_loop(
     pool: Arc<Pool>,
     mut job: RenderJob,
     mut reload: impl FnMut() -> eyre::Result<RenderJob> + Send,
     watcher: Box<dyn ResultWatcher>,
-    rerun_delay: Option<Duration>,
+    options: RunOptions,
     events: UnboundedSender<RunEvent>,
     mut commands: UnboundedReceiver<Command>,
 ) {
@@ -116,6 +127,7 @@ pub async fn demo_loop(
             &job,
             &*watcher,
             rand::random(),
+            options,
             &events,
             &mut commands,
         )
@@ -124,7 +136,7 @@ pub async fn demo_loop(
             RunEnd::Interrupted(Command::Quit) => return,
             RunEnd::Interrupted(_) => (),
             RunEnd::Ended => {
-                if !wait_for_rerun(rerun_delay, &mut commands).await {
+                if !wait_for_rerun(options.rerun_delay, &mut commands).await {
                     return;
                 }
             }
@@ -181,6 +193,7 @@ pub async fn run(
     job: &RenderJob,
     watcher: &dyn ResultWatcher,
     seed: u64,
+    options: RunOptions,
     events: &UnboundedSender<RunEvent>,
     commands: &mut UnboundedReceiver<Command>,
 ) -> RunEnd {
@@ -237,9 +250,12 @@ pub async fn run(
             Some(format!("{err}"))
         }
     };
-    if tokio::time::timeout(CLEANUP_TIMEOUT, cleanup(pool, &session_id, completed))
-        .await
-        .is_err()
+    if tokio::time::timeout(
+        CLEANUP_TIMEOUT,
+        cleanup(pool, &session_id, completed, options.keep_session),
+    )
+    .await
+    .is_err()
     {
         tracing::warn!(session_id, "session cleanup timed out");
     }
@@ -265,17 +281,23 @@ async fn toggle_pause(pool: &Pool, session_id: &str, pause: bool) {
     }
 }
 
-/// Closes a completed session, cancels an abandoned one, then purges it (its
-/// results are no longer needed). The session itself is kept.
-async fn cleanup(pool: &Pool, session_id: &str, completed: bool) {
-    for step in [if completed { "close" } else { "cancel" }, "purge"] {
+/// Closes a completed session and cancels an abandoned one, then purges its
+/// results (no longer needed); unless `keep_session` is set, deletes the
+/// session itself too (a session must be purged before it can be deleted).
+async fn cleanup(pool: &Pool, session_id: &str, completed: bool, keep_session: bool) {
+    let mut steps = vec![if completed { "close" } else { "cancel" }, "purge"];
+    if !keep_session {
+        steps.push("delete");
+    }
+    for step in steps {
         // One pooled connection per request.
         let result = async {
             let mut sessions = pool.sessions().await?;
             match step {
                 "close" => sessions.close(session_id).await?,
                 "cancel" => sessions.cancel(session_id).await?,
-                _ => sessions.purge(session_id).await?,
+                "purge" => sessions.purge(session_id).await?,
+                _ => sessions.delete(session_id).await?,
             };
             Ok::<_, eyre::Report>(())
         };

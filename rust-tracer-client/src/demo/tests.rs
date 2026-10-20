@@ -648,7 +648,7 @@ async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 async fn renders_every_block(watcher: &dyn ResultWatcher, denoise: bool) {
-    renders_every_block_through(watcher, denoise, 0, PoolConfig::default()).await;
+    renders_every_block_through(watcher, denoise, 0, PoolConfig::default(), false).await;
 }
 
 /// The first `failing_downloads` downloads of final images fail
@@ -658,6 +658,7 @@ async fn renders_every_block_through(
     denoise: bool,
     failing_downloads: usize,
     pool: PoolConfig,
+    keep_session: bool,
 ) {
     let fake = Fake::new(Behavior::Render);
     fake.failing_downloads
@@ -677,7 +678,20 @@ async fn renders_every_block_through(
     let (events, mut received) = mpsc::unbounded_channel();
     let (_commands, mut commands) = mpsc::unbounded_channel();
 
-    let end = within(run(&pool, &job, watcher, SEED, &events, &mut commands)).await;
+    let options = RunOptions {
+        rerun_delay: None,
+        keep_session,
+    };
+    let end = within(run(
+        &pool,
+        &job,
+        watcher,
+        SEED,
+        options,
+        &events,
+        &mut commands,
+    ))
+    .await;
     assert_eq!(end, RunEnd::Ended);
 
     let received = drain(&mut received);
@@ -749,7 +763,11 @@ async fn renders_every_block_through(
         })
     ));
 
-    assert_eq!(fake.calls(), ["create", "close", "purge"]);
+    if keep_session {
+        assert_eq!(fake.calls(), ["create", "close", "purge"]);
+    } else {
+        assert_eq!(fake.calls(), ["create", "close", "purge", "delete"]);
+    }
     // Every injected failure was hit, and recovered from.
     assert_eq!(
         fake.failing_downloads
@@ -827,7 +845,7 @@ async fn runs_survive_connection_recycling() {
             requests_per_connection: Some(2),
             multiplex,
         };
-        renders_every_block_through(&EventsWatcher, true, 0, pool).await;
+        renders_every_block_through(&EventsWatcher, true, 0, pool, false).await;
     }
 }
 
@@ -839,8 +857,15 @@ async fn runs_survive_failed_downloads() {
         true,
         DOWNLOAD_ATTEMPTS as usize - 1,
         PoolConfig::default(),
+        false,
     )
     .await;
+}
+
+/// A completed run keeps its session (purged) when asked to.
+#[tokio::test]
+async fn keeps_the_session_when_asked() {
+    renders_every_block_through(&EventsWatcher, false, 0, PoolConfig::default(), true).await;
 }
 
 /// A download is retried until its last attempt.
@@ -913,7 +938,15 @@ async fn intermediate_images_show_progress() {
     };
     let (end, first_passes) = within(async {
         tokio::join!(
-            run(&pool, &job, &EventsWatcher, SEED, &events, &mut commands),
+            run(
+                &pool,
+                &job,
+                &EventsWatcher,
+                SEED,
+                RunOptions::default(),
+                &events,
+                &mut commands
+            ),
             watch
         )
     })
@@ -931,7 +964,7 @@ async fn intermediate_images_show_progress() {
             render(&scene, &payload).to_display(&scene)
         );
     }
-    assert_eq!(fake.calls(), ["create", "cancel", "purge"]);
+    assert_eq!(fake.calls(), ["create", "cancel", "purge", "delete"]);
 }
 
 #[tokio::test]
@@ -950,6 +983,7 @@ async fn aborted_result_fails_and_cancels_the_session() {
         &job,
         &EventsWatcher,
         SEED,
+        RunOptions::default(),
         &events,
         &mut commands,
     ))
@@ -961,7 +995,7 @@ async fn aborted_result_fails_and_cancels_the_session() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(fake.calls(), ["create", "cancel", "purge"]);
+    assert_eq!(fake.calls(), ["create", "cancel", "purge", "delete"]);
 }
 
 #[tokio::test]
@@ -979,6 +1013,7 @@ async fn commands_pause_and_interrupt_the_run() {
         &job(),
         &EventsWatcher,
         SEED,
+        RunOptions::default(),
         &events,
         &mut commands,
     ))
@@ -986,7 +1021,7 @@ async fn commands_pause_and_interrupt_the_run() {
     assert_eq!(end, RunEnd::Interrupted(Command::Quit));
     assert_eq!(
         fake.calls(),
-        ["create", "pause", "resume", "cancel", "purge"]
+        ["create", "pause", "resume", "cancel", "purge", "delete"]
     );
     // An interrupted run does not report an outcome.
     assert!(
@@ -1007,7 +1042,10 @@ async fn demo_loop_reruns_until_quit() {
         job(),
         || Ok(job()),
         Box::new(EventsWatcher),
-        Some(Duration::from_millis(10)),
+        RunOptions {
+            rerun_delay: Some(Duration::from_millis(10)),
+            ..Default::default()
+        },
         events,
         commands,
     ));
@@ -1054,7 +1092,10 @@ async fn demo_loop_reloads_the_scene_for_each_run() {
         job(),
         move || reloads.pop().unwrap_or_else(|| Ok(job())),
         Box::new(EventsWatcher),
-        Some(Duration::from_millis(10)),
+        RunOptions {
+            rerun_delay: Some(Duration::from_millis(10)),
+            ..Default::default()
+        },
         events,
         commands,
     ));

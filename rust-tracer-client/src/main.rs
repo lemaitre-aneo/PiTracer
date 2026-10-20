@@ -114,6 +114,11 @@ pub struct Cli {
     #[arg(long)]
     pub no_auto_rerun: bool,
 
+    /// Keep the sessions at the end of each run instead of deleting them, so
+    /// they can be inspected (their results are still purged)
+    #[arg(long)]
+    pub keep_session: bool,
+
     #[command(flatten)]
     pub transport: transport::Transport,
 }
@@ -361,7 +366,6 @@ fn main() -> Result<(), eyre::Report> {
         }
     }
     let watcher = cli.watch.watcher(poll_interval);
-    let rerun_delay = (!cli.no_auto_rerun).then_some(RERUN_DELAY);
     let demo = std::thread::spawn(move || {
         runtime.block_on(async move {
             let (events, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -372,13 +376,17 @@ fn main() -> Result<(), eyre::Report> {
                     }
                 }
             });
+            let options = demo::RunOptions {
+                rerun_delay: (!cli.no_auto_rerun).then_some(RERUN_DELAY),
+                keep_session: cli.keep_session,
+            };
             let reload = move || job(&cli);
             demo::demo_loop(
                 pool,
                 first,
                 reload,
                 watcher,
-                rerun_delay,
+                options,
                 events,
                 command_receiver,
             )
