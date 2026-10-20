@@ -4,31 +4,17 @@
 use raytracer::{Block, DisplayBlock};
 
 /// Copies a display image into a tightly packed RGB24 image of
-/// `image_width` pixels per row, framing it with a one-pixel `outline` if
-/// given (marks blocks still being refined).
-pub fn blit(rgb: &mut [u8], image_width: u32, image: &DisplayBlock, outline: Option<[u8; 3]>) {
-    let Block {
-        x,
-        y,
-        width,
-        height,
-    } = image.block;
+/// `image_width` pixels per row.
+pub fn blit(rgb: &mut [u8], image_width: u32, image: &DisplayBlock) {
+    let Block { x, y, width, .. } = image.block;
     let pitch = image_width as usize * 3;
     for (row, pixels) in image.pixels.chunks_exact(width as usize).enumerate() {
         let start = (y as usize + row) * pitch + x as usize * 3;
-        for (column, (dst, pixel)) in rgb[start..start + width as usize * 3]
+        for (dst, pixel) in rgb[start..start + width as usize * 3]
             .chunks_exact_mut(3)
             .zip(pixels)
-            .enumerate()
         {
-            let edge = row == 0
-                || row + 1 == height as usize
-                || column == 0
-                || column + 1 == width as usize;
-            dst.copy_from_slice(match &outline {
-                Some(color) if edge => color,
-                _ => pixel,
-            });
+            dst.copy_from_slice(pixel);
         }
     }
 }
@@ -87,26 +73,13 @@ mod tests {
     #[test]
     fn blit_places_rows_top_down() {
         let mut rgb = vec![255; 5 * 4 * 3];
-        blit(&mut rgb, 5, &image(), None);
+        blit(&mut rgb, 5, &image());
         #[rustfmt::skip]
         assert_eq!(red(&rgb), [
             255, 255, 255, 255, 255,
             255, 0,   1,   2,   255,
             255, 3,   4,   5,   255,
             255, 6,   7,   8,   255,
-        ]);
-    }
-
-    #[test]
-    fn blit_frames_with_the_outline() {
-        let mut rgb = vec![255; 5 * 4 * 3];
-        blit(&mut rgb, 5, &image(), Some([9, 9, 9]));
-        #[rustfmt::skip]
-        assert_eq!(red(&rgb), [
-            255, 255, 255, 255, 255,
-            255, 9,   9,   9,   255,
-            255, 9,   4,   9,   255,
-            255, 9,   9,   9,   255,
         ]);
     }
 

@@ -4,6 +4,7 @@
 
 use std::time::{Duration, Instant};
 
+use raytracer::Block;
 use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
 use sdl2::rect::Rect;
@@ -42,9 +43,10 @@ impl Status {
 
 /// Shows the image until the window is closed (or Esc). Keys: Space pauses
 /// or resumes the session, R starts a new run, F11 toggles fullscreen.
-/// Blocks still being refined are framed with a color going from blue to
-/// red as their sample count goes from 100 to 500 (as the Python client).
-/// The size is the first run's; each run's [`RunEvent::Reset`] updates it.
+/// Blocks still being refined are framed with a one-pixel line, drawn at
+/// display resolution, whose color goes from blue to red as their sample
+/// count goes from 100 to 500 (as the Python client). The size is the first
+/// run's; each run's [`RunEvent::Reset`] updates it.
 pub fn run(
     sdl: &sdl2::Sdl,
     mut width: u32,
@@ -65,6 +67,9 @@ pub fn run(
     let mut pixels = vec![0u8; pitch * height as usize];
     let mut status = Status::default();
     let mut scene_error = None;
+    // Blocks still being refined, with the sample count of their latest
+    // result; framed at display resolution on every present.
+    let mut refining: Vec<(Block, u32)> = Vec::new();
 
     const PRESENT_INTERVAL: Duration = Duration::from_millis(15);
     const REDRAW_INTERVAL: Duration = Duration::from_secs(1);
@@ -93,6 +98,7 @@ pub fn run(
                     } => {
                         tracing::debug!(session_id, "new run");
                         status = Status::default();
+                        refining.clear();
                         if (new_width, new_height) != (width, height) {
                             // The scene file changed the image size.
                             (width, height) = (new_width, new_height);
@@ -110,8 +116,16 @@ pub fn run(
                     RunEvent::Block { image, done } => {
                         let block = image.block;
                         if block.x + block.width <= width && block.y + block.height <= height {
-                            let outline = (!done).then(|| outline_color(image.samples));
-                            blit(&mut pixels, width, &image, outline);
+                            blit(&mut pixels, width, &image);
+                            if done {
+                                refining.retain(|(b, _)| *b != block);
+                            } else if let Some(entry) =
+                                refining.iter_mut().find(|(b, _)| *b == block)
+                            {
+                                entry.1 = image.samples;
+                            } else {
+                                refining.push((block, image.samples));
+                            }
                         } else {
                             tracing::warn!("dropping block {block:?}, outside the image");
                         }
@@ -214,11 +228,30 @@ pub fn run(
                 }
                 std::cmp::Ordering::Equal => None,
             };
+            let dest = target.unwrap_or(Rect::new(0, 0, w, h));
 
             canvas.clear();
             canvas
                 .copy(&texture, None, target)
                 .map_err(eyre::Report::msg)?;
+
+            // Frame the blocks still being refined, one pixel wide at
+            // display resolution.
+            if dest.width() > 0 && dest.height() > 0 {
+                for (block, samples) in &refining {
+                    let color = outline_color(*samples);
+                    canvas.set_draw_color((color[0], color[1], color[2]));
+                    let x0 = dest.x() + block.x as i32 * dest.width() as i32 / width as i32;
+                    let x1 = dest.x()
+                        + (block.x + block.width) as i32 * dest.width() as i32 / width as i32;
+                    let y0 = dest.y() + block.y as i32 * dest.height() as i32 / height as i32;
+                    let y1 = dest.y()
+                        + (block.y + block.height) as i32 * dest.height() as i32 / height as i32;
+                    canvas
+                        .draw_rect(Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32))
+                        .map_err(eyre::Report::msg)?;
+                }
+            }
             canvas.present();
 
             dirty = false;
