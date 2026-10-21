@@ -326,6 +326,9 @@ fn main() -> Result<(), eyre::Report> {
         interrupted()
     };
     sdl2::hint::set("SDL_NO_SIGNAL_HANDLERS", "1");
+    // Stay on screen in fullscreen when another window takes the focus
+    // (SDL before 2.0.14 minimizes by default).
+    sdl2::hint::set("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
     let sdl = sdl2::init().map_err(eyre::Report::msg)?;
     let sdl_events = sdl.event().map_err(eyre::Report::msg)?;
     sdl_events
