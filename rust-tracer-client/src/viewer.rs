@@ -230,6 +230,8 @@ pub fn run(
             };
             let dest = target.unwrap_or(Rect::new(0, 0, w, h));
 
+            // Black bands: the draw color is left at the last outline's.
+            canvas.set_draw_color((0, 0, 0));
             canvas.clear();
             canvas
                 .copy(&texture, None, target)
