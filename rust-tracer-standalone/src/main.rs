@@ -342,7 +342,7 @@ pub fn main() -> Result<(), eyre::Report> {
                     let window = canvas.window_mut();
 
                     let state = match window.fullscreen_state() {
-                        sdl2::video::FullscreenType::Off => sdl2::video::FullscreenType::True,
+                        sdl2::video::FullscreenType::Off => sdl2::video::FullscreenType::Desktop,
                         _ => sdl2::video::FullscreenType::Off,
                     };
                     window.set_fullscreen(state).map_err(eyre::Report::msg)?;
