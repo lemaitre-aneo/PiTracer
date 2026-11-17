@@ -134,4 +134,8 @@ impl Color {
     pub fn norm(self) -> f32 {
         self.norm2().sqrt()
     }
+    /// Largest channel.
+    pub fn max_channel(self) -> f32 {
+        self.r.max(self.g).max(self.b)
+    }
 }

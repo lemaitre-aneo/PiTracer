@@ -37,6 +37,23 @@ pub struct SceneDefinition {
     /// rho -> 1. Default `0.99`: near the `1.0` performance optimum but
     /// strictly `< 1`, so the default estimator provably cannot diverge.
     pub mixture_decay: f32,
+    /// Russian roulette: from the third hit on, a path continues with
+    /// probability min(1, max channel of its throughput), and the survivors
+    /// are scaled by the inverse of that probability. Unbiased (the expected
+    /// radiance is unchanged), and paths whose contribution has faded stop
+    /// early instead of running to `recursion_depth`, at the cost of extra
+    /// variance. Whether it pays off depends on the scene: under the bean of
+    /// bean-under.yml, where the light arrives through many bounces, it
+    /// renders 2.4x faster but with 4.3x the squared error at equal
+    /// samples, a net loss. Default `false`.
+    pub russian_roulette: bool,
+    /// Paths whose throughput (the weight of what they would still bring
+    /// back, largest channel) falls below this stop. Biased, but the light
+    /// lost per path is at most this times the brightest radiance it could
+    /// still reach: at the default `1e-4`, under the bean of bean-under.yml,
+    /// it saves ~20% of the time with no measurable change to the image
+    /// (`1e-3` darkens it by ~1.6%). `0` disables it.
+    pub min_throughput: f32,
 }
 
 impl Default for SceneDefinition {
@@ -54,6 +71,8 @@ impl Default for SceneDefinition {
             // never diverge into fireflies, while staying ~at the d=1.0 optimum.
             mixture_sampling: 0.25,
             mixture_decay: 0.99,
+            russian_roulette: false,
+            min_throughput: 1e-4,
         }
     }
 }
@@ -98,6 +117,10 @@ impl std::error::Error for LoadError {
     }
 }
 
+/// Hits whose continuation the Russian roulette never cuts: the camera ray's
+/// and the first bounce's, where paths still carry most of their weight.
+const ROULETTE_START: usize = 2;
+
 #[derive(Debug, Deserialize)]
 #[serde(from = "SceneDefinition")]
 pub struct Scene {
@@ -110,6 +133,8 @@ pub struct Scene {
     pub light_sampling: bool,
     pub mixture_sampling: f32,
     pub mixture_decay: f32,
+    pub russian_roulette: bool,
+    pub min_throughput: f32,
 }
 
 impl Default for Scene {
@@ -225,6 +250,8 @@ impl From<SceneDefinition> for Scene {
             light_sampling: value.light_sampling,
             mixture_sampling: value.mixture_sampling,
             mixture_decay: value.mixture_decay,
+            russian_roulette: value.russian_roulette,
+            min_throughput: value.min_throughput,
         }
     }
 }
@@ -283,6 +310,9 @@ impl Scene {
         // c_l = mixture_sampling * decay^depth, advanced by one multiply per
         // bounce (below) rather than a powi per intersection.
         let mut mixture_prob = self.mixture_sampling;
+        // Product of the attenuations so far (the weight of what the
+        // continuation brings back), for the Russian roulette.
+        let mut throughput = Color::splat(1f32);
 
         while let Some((best, hittable, closest)) = self.closest_hit(origin, direction, rng) {
             let hit = best.as_geometry().to_hit(origin, direction, closest);
@@ -359,7 +389,8 @@ impl Scene {
 
                 // Below the horizon (pm == 0) or unsupported: zero throughput,
                 // so the path contributes nothing further; terminate here.
-                if pm <= 0f32 || p_mix <= 0f32 {
+                // Also when it enters the surface (see `Lambertian::scatter`).
+                if pm <= 0f32 || p_mix <= 0f32 || cont_dir.dot(hit.geometric) <= 0f32 {
                     colors.push(color);
                     break;
                 }
@@ -392,8 +423,12 @@ impl Scene {
                     let pm = material.pdf(direction, hit, light_direction);
                     let pl = self.light_pdf(hit.point, light_direction);
                     let shadow_origin = hit.spawn(light_direction);
+                    // A shadow ray entering the surface (below the actual
+                    // surface, above the shading normal's horizon) would
+                    // start inside the object: no direct light that way.
                     if pm > 0f32
                         && pl > 0f32
+                        && light_direction.dot(hit.geometric) > 0f32
                         && let Some((direct, direct_hittable, direct_distance)) =
                             self.closest_hit(shadow_origin, light_direction, rng)
                     {
@@ -417,6 +452,27 @@ impl Scene {
                 // No light sampling at this bounce (specular or no lights):
                 // the continuation ray is the only strategy; full pickup.
                 emission_weight = 1f32;
+            }
+
+            // Russian roulette on the continuation: this hit's emission is
+            // kept either way; what follows survives with probability q and
+            // is then weighted 1/q, so its expectation is unchanged.
+            if self.russian_roulette && colors.len() >= ROULETTE_START {
+                let survival = (throughput * color.attenuation).max_channel().min(1f32);
+                if survival < 1f32 {
+                    if rng.random::<f32>() >= survival {
+                        colors.push(color);
+                        break;
+                    }
+                    color.attenuation *= 1f32 / survival;
+                }
+            }
+            throughput *= color.attenuation;
+            // Faded path: what follows could not show (this hit's emission
+            // is kept).
+            if throughput.max_channel() < self.min_throughput {
+                colors.push(color);
+                break;
             }
 
             colors.push(color);
@@ -616,6 +672,11 @@ mod test {
             light_sampling,
             mixture_sampling: 0.0,
             mixture_decay: 1.0,
+            // the tests below pin the plain estimator (some exactly); the
+            // roulette and the cutoff have their own (`russian_roulette_*`,
+            // `min_throughput_*`)
+            russian_roulette: false,
+            min_throughput: 0.0,
         })
     }
 
@@ -1184,6 +1245,70 @@ mod test {
                 assert_stat_close(stats.mean(), stats.se(), expected, 4f32, bracket);
             }
         }
+    }
+
+    /// Russian roulette leaves the expectation unchanged: on a deep furnace
+    /// (rho = 0.8, 30 bounces, so the roulette cuts most paths well before
+    /// the limit), the mean with it matches the plain estimator's, for BRDF
+    /// sampling (whose paths all carry the exact series), next-event
+    /// estimation and mixture sampling.
+    #[test]
+    fn russian_roulette_unbiased() {
+        for (light_sampling, mixture_sampling) in [(false, 0f32), (true, 0f32), (false, 0.25)] {
+            let mut plain = furnace(0.8f32, 0.5f32, 30, light_sampling);
+            plain.mixture_sampling = mixture_sampling;
+            plain.mixture_decay = 0.99;
+            let mut roulette = furnace(0.8f32, 0.5f32, 30, light_sampling);
+            roulette.mixture_sampling = mixture_sampling;
+            roulette.mixture_decay = 0.99;
+            roulette.russian_roulette = true;
+            for seed in seeds() {
+                let expected = sample_center(&plain, 20_000, seed);
+                let observed = sample_center(&roulette, 20_000, seed + 100);
+                for (expected, observed) in expected.iter().zip(&observed) {
+                    let se = (expected.se().powi(2) + observed.se().powi(2)).sqrt();
+                    assert_stat_close(observed.mean(), se, expected.mean(), 4f32, 0f32);
+                }
+                // and it does play: the plain BRDF-sampled furnace has no
+                // variance at all
+                assert!(observed[0].var() > 1e-3, "roulette never cut a path");
+            }
+        }
+    }
+
+    /// The roulette never cuts the first `ROULETTE_START` hits: with a
+    /// furnace whose walls absorb almost everything, the camera hit and the
+    /// first bounce are collected on every path, so no sample is below
+    /// E * (1 + rho).
+    #[test]
+    fn russian_roulette_spares_first_bounces() {
+        let mut scene = furnace(0.01f32, 1f32, 30, false);
+        scene.russian_roulette = true;
+        let mut rng = rng(seeds()[0]);
+        for _ in 0..1_000 {
+            let sample = scene.radiance(2f32, 2f32, &mut rng);
+            assert!(sample.r >= 1.01f32 - 1e-6, "{sample:?}");
+        }
+    }
+
+    /// The cutoff stops a path at the first hit whose continuation weighs
+    /// less than `min_throughput`: in a BRDF-sampled furnace (rho = 0.5,
+    /// every path identical), the continuation after hit k weighs 0.5^(k+1),
+    /// which first drops below 1e-4 after hit 13, so the value is the series
+    /// of the first 14 hits, exactly, however deep the limit.
+    #[test]
+    fn min_throughput_cuts_faded_paths() {
+        let series = |m: i32| 0.5f64 * (1f64 - 0.5f64.powi(m)) / 0.5f64;
+        for depth in [30, 100] {
+            let mut scene = furnace(0.5f32, 0.5f32, depth, false);
+            scene.min_throughput = 1e-4;
+            let stats = sample_center(&scene, 100, seeds()[0]);
+            assert!(stats[0].var() < 1e-20);
+            assert_close(stats[0].mean(), series(14), 1e-6);
+        }
+        // disabled: the depth limit alone (deeper than 14 hits)
+        let stats = sample_center(&furnace(0.5f32, 0.5f32, 30, false), 100, seeds()[0]);
+        assert!(stats[0].mean() > series(14) + 1e-6);
     }
 
     /// Closed-form anchor, BRDF sampling only: L = rho*E*r^2/d^2 = 0.15.

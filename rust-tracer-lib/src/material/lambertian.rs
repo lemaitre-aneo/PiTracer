@@ -12,7 +12,12 @@ impl<R: crate::Rng + ?Sized> Material<R> for Lambertian {
         // Cosine sampling is load-bearing, not a variance tweak: the renderer
         // multiplies throughput by the albedo alone, which is only correct
         // when p = cos(theta)/pi (see the ground-truth note below).
-        Some(UnitVector::random_cosine(hit.normal, rng))
+        let scattered = UnitVector::random_cosine(hit.normal, rng);
+        // With a shading normal (smooth mesh), the lobe can dip below the
+        // actual surface: such a ray would start inside the object (see
+        // `Hit::spawn`) and, in a closed mesh, never get out. It is absorbed
+        // instead.
+        (scattered.dot(hit.geometric) > 0f32).then_some(scattered)
     }
 
     fn pdf(&self, _direction: UnitVector, hit: Hit, scattered: UnitVector) -> f32 {
@@ -61,6 +66,34 @@ mod test {
                 );
             }
         }
+    }
+
+    /// With a shading normal tilted from the geometric one (smooth mesh),
+    /// the part of the cosine lobe below the actual surface is absorbed
+    /// rather than sent into the object; the rest is unchanged. Tilt 0.5 rad:
+    /// the lobe's mass below the plane is (1 - cos 0.5) / 2 ~ 6%.
+    #[test]
+    fn absorbed_below_the_surface() {
+        let geometric = UnitVector::Y;
+        let normal = at_angle(geometric, 0.5f64);
+        let hit = Hit {
+            geometric,
+            ..hit_at(Vector::default(), normal, true)
+        };
+        let incoming = -normal;
+        let mut rng = rng(seeds()[0]);
+        let n = 100_000;
+        let mut absorbed = 0;
+        for _ in 0..n {
+            match MATERIAL.scatter(incoming, hit, &mut rng) {
+                Some(scattered) => assert!(scattered.dot(geometric) > 0f32, "{scattered:?}"),
+                None => absorbed += 1,
+            }
+        }
+        let fraction = f64::from(absorbed) / f64::from(n);
+        let expected = (1f64 - 0.5f64.cos()) / 2f64;
+        let se = (expected * (1f64 - expected) / f64::from(n)).sqrt();
+        assert_stat_close(fraction, se, expected, 4f32, 0f32);
     }
 
     #[test]

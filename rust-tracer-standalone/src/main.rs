@@ -66,6 +66,17 @@ pub struct Cli {
     #[arg(long, default_value = "-1")]
     pub mixture_decay: f32,
 
+    /// Russian roulette: stop faded paths early, at random, scaling up the
+    /// survivors (unbiased) [default: the scene's, false]
+    #[arg(long)]
+    pub russian_roulette: Option<bool>,
+
+    /// Stop paths whose throughput falls below this (biased, invisible at
+    /// the scene default 1e-4); 0 disables. Negative = use the scene file's
+    /// value.
+    #[arg(long, default_value = "-1")]
+    pub min_throughput: f32,
+
     /// Render one frame (the scene's samples per pixel, or -S) into this
     /// image file (format from the extension: png, jpg) and exit, without
     /// opening a window
@@ -132,6 +143,16 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
         cli.mixture_decay = scene.mixture_decay;
     } else {
         scene.mixture_decay = cli.mixture_decay;
+    }
+    if cli.min_throughput < 0f32 {
+        cli.min_throughput = scene.min_throughput;
+    } else {
+        scene.min_throughput = cli.min_throughput;
+    }
+    if let Some(rr) = cli.russian_roulette {
+        scene.russian_roulette = rr;
+    } else {
+        cli.russian_roulette = Some(scene.russian_roulette);
     }
     let scene = Scene::from(scene);
     tracing::debug!("{scene:?}");

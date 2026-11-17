@@ -15,18 +15,23 @@ pub struct Metal {
 impl<R: crate::Rng + ?Sized> Material<R> for Metal {
     fn scatter(&self, direction: UnitVector, hit: Hit, rng: &mut R) -> Option<UnitVector> {
         let reflected = direction.reflect(hit.normal);
-        if self.fuzziness > 0f32 {
-            Some((reflected + self.fuzziness * UnitVector::random(rng)).normalized())
+        let scattered = if self.fuzziness > 0f32 {
+            (reflected + self.fuzziness * UnitVector::random(rng)).normalized()
         } else {
-            Some(reflected)
-        }
+            reflected
+        };
+        // Reflecting about a shading normal (smooth mesh), or the fuzz, can
+        // send the ray below the actual surface: it would start inside the
+        // object (see `Hit::spawn`) and, in a closed mesh, bounce there
+        // until the depth limit. It is absorbed instead.
+        (scattered.dot(hit.geometric) > 0f32).then_some(scattered)
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test_utils::{assert_vec_close, hit_at, rng, seeds};
+    use crate::test_utils::{assert_vec_close, at_angle, hit_at, rng, seeds};
     use crate::{Dielectric, Vector};
 
     /// Random (incoming, normal) pair respecting the hit convention
@@ -73,9 +78,10 @@ mod test {
             let (incoming, hit) = fixture(&mut rng);
             let mirror = incoming.reflect(hit.normal);
             for _ in 0..10_000 {
-                let scattered = material
-                    .scatter(incoming, hit, &mut rng)
-                    .expect("must scatter");
+                // fuzz pushing it below the surface: absorbed (tested below)
+                let Some(scattered) = material.scatter(incoming, hit, &mut rng) else {
+                    continue;
+                };
                 assert!(
                     scattered.dot(mirror) >= bound - 1e-5,
                     "fuzz {fuzziness}: {scattered:?} is {} > asin(fuzziness) away from {mirror:?}",
@@ -83,6 +89,44 @@ mod test {
                 );
             }
         }
+    }
+
+    /// A reflection going below the actual surface (shading normal tilted
+    /// from the geometric one, as on a smooth mesh) would start inside the
+    /// object: it is absorbed, and only then.
+    #[test]
+    fn absorbed_below_the_surface() {
+        let material: &dyn Material = &Metal { fuzziness: 0f32 };
+        let geometric = UnitVector::Y;
+        let normal = at_angle(geometric, 0.4f64);
+        let hit = Hit {
+            geometric,
+            ..hit_at(Vector::default(), normal, true)
+        };
+        let mut rng = rng(seeds()[0]);
+        let (mut absorbed, mut reflected) = (0, 0);
+        for _ in 0..10_000 {
+            let incoming = UnitVector::random(&mut rng);
+            if incoming.dot(geometric) >= 0f32 || incoming.dot(normal) >= 0f32 {
+                continue;
+            }
+            let mirror = incoming.reflect(normal);
+            match material.scatter(incoming, hit, &mut rng) {
+                Some(scattered) => {
+                    assert!(mirror.dot(geometric) > 0f32);
+                    assert_eq!(Vector::from(scattered), Vector::from(mirror));
+                    reflected += 1;
+                }
+                None => {
+                    assert!(mirror.dot(geometric) <= 0f32, "{mirror:?} absorbed");
+                    absorbed += 1;
+                }
+            }
+        }
+        assert!(
+            absorbed > 100 && reflected > 100,
+            "{absorbed} / {reflected}"
+        );
     }
 
     /// MIS-critical spec: a specular/delta BSDF has no density with respect

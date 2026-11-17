@@ -224,6 +224,8 @@ mod test {
             light_sampling: false,
             mixture_sampling: 0.0,
             mixture_decay: 1.0,
+            russian_roulette: false,
+            min_throughput: 0.0,
         })
     }
 

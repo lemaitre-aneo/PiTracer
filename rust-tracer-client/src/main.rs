@@ -69,6 +69,17 @@ pub struct Cli {
     #[arg(long, default_value = "-1")]
     pub mixture_decay: f32,
 
+    /// Russian roulette: stop faded paths early, at random, scaling up the
+    /// survivors (unbiased) [default: the scene's, false]
+    #[arg(long)]
+    pub russian_roulette: Option<bool>,
+
+    /// Stop paths whose throughput falls below this (biased, invisible at
+    /// the scene default 1e-4); 0 disables. Negative = use the scene file's
+    /// value.
+    #[arg(long, default_value = "-1")]
+    pub min_throughput: f32,
+
     /// Width of a task's block, in pixels (a multiple of 16 when denoising)
     #[arg(long, default_value = "64")]
     pub task_width: u32,
@@ -183,6 +194,12 @@ fn scene(cli: &Cli) -> Result<SceneDefinition, eyre::Report> {
     }
     if cli.mixture_decay >= 0f32 {
         scene.mixture_decay = cli.mixture_decay;
+    }
+    if let Some(russian_roulette) = cli.russian_roulette {
+        scene.russian_roulette = russian_roulette;
+    }
+    if cli.min_throughput >= 0f32 {
+        scene.min_throughput = cli.min_throughput;
     }
     Ok(scene)
 }
@@ -474,6 +491,41 @@ objects:
         let edited = job(&cli(&path, &[])).unwrap();
         assert_eq!(edited.width, 20);
         assert_ne!(edited.scene, first.scene);
+    }
+
+    /// The path-termination settings travel to the workers inside the
+    /// scene: the scene file's (or the defaults), unless the command line
+    /// overrides them.
+    #[test]
+    fn path_termination_settings_reach_the_workers() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("scene.yml");
+        std::fs::write(&path, SCENE).unwrap();
+        let received = |extra: &[&str]| {
+            raytracer::decode_scene(&job(&cli(&path, extra)).unwrap().scene).unwrap()
+        };
+
+        let defaults = received(&[]);
+        assert_eq!(
+            (defaults.russian_roulette, defaults.min_throughput),
+            (false, 1e-4)
+        );
+        let overridden = received(&["--russian-roulette", "true", "--min-throughput", "0"]);
+        assert_eq!(
+            (overridden.russian_roulette, overridden.min_throughput),
+            (true, 0.0)
+        );
+
+        std::fs::write(
+            &path,
+            format!("{SCENE}russian_roulette: true\nmin_throughput: 0.001\n"),
+        )
+        .unwrap();
+        let from_file = received(&[]);
+        assert_eq!(
+            (from_file.russian_roulette, from_file.min_throughput),
+            (true, 1e-3)
+        );
     }
 
     /// Texture files are read relative to the scene file, and travel inside
