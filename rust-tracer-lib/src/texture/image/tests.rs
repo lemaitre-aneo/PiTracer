@@ -8,6 +8,7 @@ fn hit_at(u: f32, v: f32) -> Hit {
     Hit {
         point: Vector::default(),
         normal: UnitVector::default(),
+        geometric: UnitVector::default(),
         front: true,
         u,
         v,

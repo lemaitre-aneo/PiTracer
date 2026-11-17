@@ -87,8 +87,8 @@ fn scene(cli: &mut Cli) -> Result<Scene, eyre::Report> {
         .add_source(config::File::with_name(&cli.scene))
         .build()?
         .try_deserialize::<SceneDefinition>()?;
-    // Texture files are relative to the scene file.
-    scene.load_textures(
+    // Texture and model files are relative to the scene file.
+    scene.load(
         std::path::Path::new(&cli.scene)
             .parent()
             .unwrap_or(".".as_ref()),
@@ -421,7 +421,7 @@ mod test {
             .unwrap()
             .try_deserialize::<::raytracer::SceneDefinition>()
             .unwrap();
-        definition.load_textures(".".as_ref()).unwrap();
+        definition.load(".".as_ref()).unwrap();
         definition.light_sampling = light_sampling;
         // This helper feeds the NEE/PT firefly-bound test, whose
         // 2*E*(depth+1) bound is the NEE invariant; disable the (now-default)
@@ -475,6 +475,51 @@ objects:
             .build()
             .unwrap()
             .try_deserialize::<::raytracer::SceneDefinition>()
+    }
+
+    /// The mesh example through the real stack: the config crate (nested
+    /// arrays, a scalar `scaling`, `scale` left to the marble), then the
+    /// model files read relative to the scene, then the wire format the
+    /// workers decode, which must carry the meshes inline and rebuild them
+    /// identically.
+    #[test]
+    fn mesh_yaml_loads_and_travels() {
+        let mut definition = config::Config::builder()
+            .add_source(config::File::with_name("mesh.yml"))
+            .build()
+            .unwrap()
+            .try_deserialize::<::raytracer::SceneDefinition>()
+            .unwrap();
+        definition.load(".".as_ref()).unwrap();
+        let meshes: Vec<&::raytracer::Mesh> = definition
+            .objects
+            .iter()
+            .filter_map(|o| match &o.geometry {
+                ::raytracer::GeometryEnum::Mesh(mesh) => Some(mesh),
+                _ => None,
+            })
+            .collect();
+        // knot: 160 x 12 quads; gem: 20 facets; pyramid: 6 inline triangles
+        assert_eq!(
+            meshes.iter().map(|m| m.len()).collect::<Vec<_>>(),
+            [3840, 20, 6]
+        );
+        let pyramid = definition.objects.last().unwrap();
+        let ::raytracer::TextureEnum::Marble(marble) = &pyramid.texture else {
+            panic!("the pyramid is marble");
+        };
+        assert_eq!(marble.scale, 2.5f32);
+        // base 2 x 2 scaled by 2.5: the base alone is 25
+        assert!(meshes[2].area() > 25f32);
+
+        let received = ::raytracer::decode_scene(&::raytracer::encode_scene(&definition)).unwrap();
+        assert_eq!(received.objects, definition.objects);
+        let wire = String::from_utf8(::raytracer::encode_scene(&definition)).unwrap();
+        assert!(!wire.contains("knot.obj") && !wire.contains("gem.stl"));
+        let scene = ::raytracer::Scene::from(received);
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+        let color = scene.pixel_radiance(160, 120, &mut rng);
+        assert!(color.r.is_finite() && color.g.is_finite() && color.b.is_finite());
     }
 
     /// The shipped scene must survive the whole deserialization stack (config
@@ -629,10 +674,13 @@ objects:
     position: [0, 0, 5]
     u: [1, 0, 0]
     v: [0, 1, 0]
+  - type: Mesh
+    vertices: [[0, 0, 5], [1, 0, 5], [0, 1, 5]]
+    triangles: [[0, 1, 2]]
 ",
         )
         .unwrap();
-        assert_eq!(definition.objects.len(), 3);
+        assert_eq!(definition.objects.len(), 4);
         assert!(matches!(
             definition.objects[0].geometry,
             ::raytracer::GeometryEnum::Sphere(_)
@@ -645,6 +693,24 @@ objects:
             definition.objects[2].geometry,
             ::raytracer::GeometryEnum::Ellipse(_)
         ));
+        assert!(matches!(
+            definition.objects[3].geometry,
+            ::raytracer::GeometryEnum::Mesh(_)
+        ));
+    }
+
+    /// An inconsistent mesh fails the scene, like an unknown `type`, rather
+    /// than rendering garbage or nothing.
+    #[test]
+    fn invalid_mesh_rejected() {
+        for entry in [
+            "vertices: [[0, 0, 5], [1, 0, 5]]\n    triangles: [[0, 1, 2]]",
+            "vertices: [[0, 0, 5], [1, 0, 5], [0, 1, 5]]\n    triangles: [[0, 1, 2]]\n    scaling: 0",
+            "model: m.obj\n    vertices: [[0, 0, 5]]",
+        ] {
+            let result = parse(&format!("objects:\n  - type: mesh\n    {entry}\n"));
+            assert!(result.is_err(), "{entry}: {result:?}");
+        }
     }
 
     /// An ellipse entry round-trips through the flatten + definition path:

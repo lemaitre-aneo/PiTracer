@@ -68,7 +68,9 @@ impl<G: Geometry, M: std::fmt::Debug, T: Texture> Geometry for Object<G, M, T> {
             return Some((distance, caster));
         }
         loop {
-            let hit = self.geometry.to_hit(origin, direction, distance);
+            // Resolved on the caster: composite geometry (a mesh) only knows
+            // which face it struck through it.
+            let hit = caster.as_geometry().to_hit(origin, direction, distance);
             let opacity = self.texture.opacity(&hit);
             if opacity >= 1.0 || rng.random::<f32>() < opacity {
                 return Some((distance, caster));

@@ -171,6 +171,7 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Ellipse {
         Hit {
             point,
             normal,
+            geometric: normal,
             front,
             // Disk coordinates in [-1, 1]: (0, 0) at the center, +/-1 on the
             // boundary along each semi-axis.

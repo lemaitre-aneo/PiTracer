@@ -34,6 +34,7 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Sphere {
         Hit {
             point,
             normal,
+            geometric: normal,
             front,
             u: point.x,
             v: point.y,

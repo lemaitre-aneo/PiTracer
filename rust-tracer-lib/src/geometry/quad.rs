@@ -177,6 +177,7 @@ impl<R: crate::Rng + ?Sized> GeometryPrimitive<R> for Quad {
         Hit {
             point,
             normal,
+            geometric: normal,
             front,
             u: alpha,
             v: beta,

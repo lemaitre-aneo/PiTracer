@@ -366,3 +366,6 @@ FodyWeavers.xsd
 
 # Rust
 **/target
+
+# Example mesh models (`*.obj` above is a Visual Studio build artifact)
+!rust-tracer-standalone/models/*.obj

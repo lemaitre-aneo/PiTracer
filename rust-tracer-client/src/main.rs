@@ -152,13 +152,14 @@ fn scene(cli: &Cli) -> Result<SceneDefinition, eyre::Report> {
         .build()?
         .try_deserialize::<SceneDefinition>()
         .wrap_err_with(|| format!("could not load the scene {}", cli.scene))?;
-    // Texture files are relative to the scene file, and travel in the scene.
+    // Texture and model files are relative to the scene file, and travel in
+    // the scene.
     let folder = std::path::Path::new(&cli.scene)
         .parent()
         .unwrap_or(".".as_ref());
     scene
-        .load_textures(folder)
-        .wrap_err_with(|| format!("could not load the textures of the scene {}", cli.scene))?;
+        .load(folder)
+        .wrap_err_with(|| format!("could not load the files of the scene {}", cli.scene))?;
     if cli.width != 0 {
         scene.camera.width = cli.width;
     }

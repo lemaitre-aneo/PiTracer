@@ -59,13 +59,42 @@ impl Default for SceneDefinition {
 }
 
 impl SceneDefinition {
-    /// Reads the files the textures refer to, relative to `base` (the scene
-    /// file's folder). From then on the scene carries their contents, also
-    /// when serialized: call it after reading a scene file.
-    pub fn load_textures(&mut self, base: &std::path::Path) -> Result<(), crate::ImageError> {
-        self.objects
-            .iter_mut()
-            .try_for_each(|object| object.texture.load(base))
+    /// Reads the files the objects refer to (texture images, mesh models),
+    /// relative to `base` (the scene file's folder). From then on the scene
+    /// carries their contents, also when serialized: call it after reading a
+    /// scene file.
+    pub fn load(&mut self, base: &std::path::Path) -> Result<(), LoadError> {
+        self.objects.iter_mut().try_for_each(|object| {
+            object.geometry.load(base).map_err(LoadError::Mesh)?;
+            object.texture.load(base).map_err(LoadError::Texture)
+        })
+    }
+}
+
+/// Why [`SceneDefinition::load`] failed.
+#[derive(Debug)]
+pub enum LoadError {
+    Texture(crate::ImageError),
+    Mesh(crate::MeshError),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadError::Texture(error) => error.fmt(f),
+            LoadError::Mesh(error) => error.fmt(f),
+        }
+    }
+}
+
+/// Transparent: it displays as the error it wraps, so its source is that
+/// error's (a report would otherwise print the same line twice).
+impl std::error::Error for LoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LoadError::Texture(error) => error.source(),
+            LoadError::Mesh(error) => error.source(),
+        }
     }
 }
 
@@ -143,6 +172,9 @@ fn build_object(
         }
         GeometryEnum::Ellipse(ellipse) => {
             build_textured(Object::new(ellipse, object.material, object.texture))
+        }
+        GeometryEnum::Mesh(mesh) => {
+            build_textured(Object::new(mesh, object.material, object.texture))
         }
     };
     (h, w)
@@ -461,7 +493,7 @@ impl Scene {
 mod test {
     use super::*;
     use crate::test_utils::{Stats, assert_close, assert_stat_close, rng, seeds};
-    use crate::{Ellipse, Flat, Lambertian, Marble, Metal, Quad, Sphere, Vector};
+    use crate::{Ellipse, Flat, Lambertian, Marble, Mesh, Metal, Quad, Sphere, Vector};
 
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 4;
@@ -517,6 +549,45 @@ mod test {
                 emission: emission.into(),
             }),
         )
+    }
+
+    fn mesh_lambertian(
+        mesh: Mesh,
+        color: (f32, f32, f32),
+        emission: (f32, f32, f32),
+    ) -> Object<GeometryEnum, MaterialEnum, TextureEnum> {
+        Object::new(
+            GeometryEnum::Mesh(mesh),
+            MaterialEnum::Lambertian(Lambertian {}),
+            TextureEnum::Flat(Flat {
+                color: color.into(),
+                emission: emission.into(),
+            }),
+        )
+    }
+
+    /// Box [min, min + size]^3 as a closed 12-triangle mesh (winding is
+    /// irrelevant to these tests: emission and Lambertian are two-sided).
+    fn mesh_box(min: (f32, f32, f32), size: f32) -> Mesh {
+        let min = Vector::from(min);
+        let vertices = (0..8)
+            .map(|i| {
+                min + size
+                    * Vector::from(((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32))
+            })
+            .collect();
+        let triangles = [
+            [0, 2, 6, 4],
+            [1, 3, 7, 5],
+            [0, 1, 5, 4],
+            [2, 3, 7, 6],
+            [0, 1, 3, 2],
+            [4, 5, 7, 6],
+        ]
+        .iter()
+        .flat_map(|&[a, b, c, d]| [[a, b, c], [a, c, d]])
+        .collect();
+        Mesh::new(vertices, triangles).unwrap()
     }
 
     fn scene(
@@ -670,6 +741,164 @@ mod test {
             5,
             light_sampling,
         )
+    }
+
+    /// The quad light of `quad_light_scene` as a two-triangle mesh.
+    fn mesh_light_scene(light_sampling: bool) -> Scene {
+        let corner = Vector::from((-0.5f32, 1f32, -0.5f32));
+        let (u, v) = (Vector::from(UnitVector::X), Vector::from(UnitVector::Z));
+        let square = Mesh::new(
+            vec![corner, corner + u, corner + u + v, corner + v],
+            vec![[0, 1, 2], [0, 2, 3]],
+        )
+        .unwrap();
+        scene(
+            (1.2f32, 1.2f32, 0f32),
+            (-1.2f32, -1.2f32, 0f32),
+            vec![
+                lambertian(
+                    (0f32, -100f32, 0f32),
+                    100f32,
+                    (0.75f32, 0.75f32, 0.75f32),
+                    (0f32, 0f32, 0f32),
+                ),
+                mesh_lambertian(square, (0f32, 0f32, 0f32), (5f32, 5f32, 5f32)),
+            ],
+            5,
+            light_sampling,
+        )
+    }
+
+    /// Same floor and camera, lit by a closed emissive box (0.4 wide,
+    /// floating at height 0.8 to 1.2). Every direction toward it crosses its
+    /// surface twice: light sampling is only unbiased if the mesh's
+    /// target_pdf sums both crossings (the nearest alone would double the
+    /// direct term).
+    fn box_light_scene(light_sampling: bool) -> Scene {
+        scene(
+            (1.2f32, 1.2f32, 0f32),
+            (-1.2f32, -1.2f32, 0f32),
+            vec![
+                lambertian(
+                    (0f32, -100f32, 0f32),
+                    100f32,
+                    (0.75f32, 0.75f32, 0.75f32),
+                    (0f32, 0f32, 0f32),
+                ),
+                mesh_lambertian(
+                    mesh_box((-0.2f32, 0.8f32, -0.2f32), 0.4f32),
+                    (0f32, 0f32, 0f32),
+                    (5f32, 5f32, 5f32),
+                ),
+            ],
+            5,
+            light_sampling,
+        )
+    }
+
+    fn assert_same_mean(name: &str, a: &[Stats; 3], b: &[Stats; 3]) {
+        for (a, b) in a.iter().zip(b) {
+            let se = (a.se().powi(2) + b.se().powi(2)).sqrt();
+            assert!(
+                (a.mean() - b.mean()).abs() <= 4f64 * se,
+                "{name}: {} vs {} ({:.1}σ)",
+                a.mean(),
+                b.mean(),
+                (a.mean() - b.mean()).abs() / se,
+            );
+        }
+    }
+
+    /// A mesh light is unbiased under light sampling: ON and OFF agree, and
+    /// the two-triangle square renders like the quad it equals.
+    #[test]
+    fn mesh_light_sampling_invariance() {
+        let off = sample_center(&mesh_light_scene(false), 300_000, seeds()[0]);
+        let on = sample_center(&mesh_light_scene(true), 100_000, seeds()[1]);
+        assert_same_mean("mesh light ON vs OFF", &on, &off);
+        let quad = sample_center(&quad_light_scene(true), 100_000, seeds()[2]);
+        assert_same_mean("mesh light vs quad light", &on, &quad);
+    }
+
+    /// The closed box light under NEE and under the mixture estimator (both
+    /// read the light pdf) agrees with BRDF sampling alone.
+    #[test]
+    fn box_light_sampling_invariance() {
+        let off = sample_center(&box_light_scene(false), 1_000_000, seeds()[0]);
+        let on = sample_center(&box_light_scene(true), 200_000, seeds()[1]);
+        assert_same_mean("box light NEE vs OFF", &on, &off);
+        let mut scene = box_light_scene(true);
+        scene.mixture_sampling = 0.25;
+        scene.mixture_decay = 0.99;
+        let mix = sample_center(&scene, 200_000, seeds()[2]);
+        assert_same_mean("box light mixture vs OFF", &mix, &off);
+    }
+
+    /// A closed box of purely emissive mesh faces around the camera: every
+    /// path ends on its first hit with exactly E, so a single ray slipping
+    /// through a shared edge (or a BVH box wrongly culled) shows up as a
+    /// black sample. Probed through edges and corners of the box too.
+    #[test]
+    fn emissive_mesh_box_exact() {
+        let emission = (0.25f32, 0.5f32, 0.75f32);
+        for light_sampling in [false, true] {
+            let mut scene = scene(
+                (0f32, 0f32, 0f32),
+                (0f32, 0f32, 1f32),
+                vec![mesh_lambertian(
+                    mesh_box((-5f32, -5f32, -5f32), 10f32),
+                    (0f32, 0f32, 0f32),
+                    emission,
+                )],
+                10,
+                light_sampling,
+            );
+            let mut rng = rng(seeds()[0]);
+            // the corners of the image look exactly along the box's
+            // diagonals at a 90-degree field of view
+            for (x, y) in [
+                (2f32, 2f32),
+                (0f32, 0f32),
+                (4f32, 4f32),
+                (0f32, 4f32),
+                (2f32, 0f32),
+                (0.5f32, 3.5f32),
+            ] {
+                for _ in 0..20 {
+                    let color = scene.radiance(x, y, &mut rng);
+                    assert_eq!(
+                        (color.r, color.g, color.b),
+                        emission,
+                        "light_sampling = {light_sampling} at ({x}, {y})",
+                    );
+                }
+            }
+            // From a face's plane: along the floor (y = -5), the exact
+            // center ray has a zero y component and starts on the y bound of
+            // every wall's BVH box (the 0 * inf slab case); away from the
+            // left wall (x = -5), every ray must find the box.
+            let camera = |origin: (f32, f32, f32), direction: (f32, f32, f32)| {
+                crate::CameraDefinition {
+                    origin: Vector::from(origin),
+                    direction: Vector::from(direction),
+                    field_of_view: 90f32,
+                    width: WIDTH,
+                    height: HEIGHT,
+                    world_height: 0.1,
+                }
+                .into()
+            };
+            scene.camera = camera((0f32, -5f32, 0f32), (1f32, 0f32, 0f32));
+            let color = scene.radiance((WIDTH / 2) as f32, (HEIGHT / 2) as f32, &mut rng);
+            assert_eq!((color.r, color.g, color.b), emission, "along the floor");
+            scene.camera = camera((-5f32, 0f32, 0f32), (1f32, 0f32, 0f32));
+            for (x, y) in [(0, 0), (1, 2), (3, 3), (2, 0)] {
+                for _ in 0..20 {
+                    let color = scene.pixel_radiance(x, y, &mut rng);
+                    assert_eq!((color.r, color.g, color.b), emission, "away from the wall");
+                }
+            }
+        }
     }
 
     /// Estimator equality for the disk light: ON and OFF must converge to
