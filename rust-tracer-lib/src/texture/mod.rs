@@ -5,10 +5,12 @@ use crate::{Color, Hit};
 
 mod flat;
 mod image;
+mod mandelbrot;
 mod marble;
 
 pub use self::image::{DecodeError, Image, ImageError, SvgError};
 pub use flat::*;
+pub use mandelbrot::*;
 pub use marble::*;
 
 pub trait Texture<R: Rng + ?Sized = dyn Rng>: std::fmt::Debug {
@@ -42,6 +44,7 @@ pub enum TextureEnum {
     Flat(Flat),
     Marble(Marble),
     Image(Image),
+    Mandelbrot(Mandelbrot),
 }
 
 impl Default for TextureEnum {
@@ -57,7 +60,7 @@ impl TextureEnum {
         match self {
             TextureEnum::Flat(flat) => flat.emission,
             TextureEnum::Marble(marble) => marble.emission,
-            TextureEnum::Image(_) => Color::default(),
+            TextureEnum::Image(_) | TextureEnum::Mandelbrot(_) => Color::default(),
         }
     }
 
@@ -65,7 +68,7 @@ impl TextureEnum {
     pub fn load(&mut self, base: &std::path::Path) -> Result<(), ImageError> {
         match self {
             TextureEnum::Image(image) => image.load(base),
-            TextureEnum::Flat(_) | TextureEnum::Marble(_) => Ok(()),
+            TextureEnum::Flat(_) | TextureEnum::Marble(_) | TextureEnum::Mandelbrot(_) => Ok(()),
         }
     }
 }
@@ -76,20 +79,21 @@ impl<R: crate::Rng + ?Sized> Texture<R> for TextureEnum {
             TextureEnum::Flat(flat) => flat.get(hit, rng),
             TextureEnum::Marble(marble) => marble.get(hit, rng),
             TextureEnum::Image(image) => image.get(hit, rng),
+            TextureEnum::Mandelbrot(mandelbrot) => mandelbrot.get(hit, rng),
         }
     }
 
     fn transparent(&self) -> bool {
         match self {
             TextureEnum::Image(image) => Texture::<R>::transparent(image),
-            TextureEnum::Flat(_) | TextureEnum::Marble(_) => false,
+            TextureEnum::Flat(_) | TextureEnum::Marble(_) | TextureEnum::Mandelbrot(_) => false,
         }
     }
 
     fn opacity(&self, hit: &Hit) -> f32 {
         match self {
             TextureEnum::Image(image) => Texture::<R>::opacity(image, hit),
-            TextureEnum::Flat(_) | TextureEnum::Marble(_) => 1.0,
+            TextureEnum::Flat(_) | TextureEnum::Marble(_) | TextureEnum::Mandelbrot(_) => 1.0,
         }
     }
 }
@@ -97,7 +101,7 @@ impl<R: crate::Rng + ?Sized> Texture<R> for TextureEnum {
 mod definition {
     use serde::{Deserialize, Serialize};
 
-    use super::{Flat, Image, Marble};
+    use super::{Flat, Image, Mandelbrot, Marble};
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "texture", rename_all = "lowercase")]
@@ -108,6 +112,8 @@ mod definition {
         Marble(Marble),
         #[serde(alias = "Image")]
         Image(Image),
+        #[serde(alias = "Mandelbrot")]
+        Mandelbrot(Mandelbrot),
     }
 
     /// A missing `texture:` tag falls back to `Flat` (whose fields all
@@ -133,6 +139,9 @@ mod definition {
                 Texture::Texture(TextureEnum::Flat(flat)) | Texture::Flat(flat) => Self::Flat(flat),
                 Texture::Texture(TextureEnum::Marble(marble)) => Self::Marble(marble),
                 Texture::Texture(TextureEnum::Image(image)) => Self::Image(image),
+                Texture::Texture(TextureEnum::Mandelbrot(mandelbrot)) => {
+                    Self::Mandelbrot(mandelbrot)
+                }
             }
         }
     }
@@ -143,6 +152,9 @@ mod definition {
                 super::TextureEnum::Flat(flat) => Self::Texture(TextureEnum::Flat(flat)),
                 super::TextureEnum::Marble(marble) => Self::Texture(TextureEnum::Marble(marble)),
                 super::TextureEnum::Image(image) => Self::Texture(TextureEnum::Image(image)),
+                super::TextureEnum::Mandelbrot(mandelbrot) => {
+                    Self::Texture(TextureEnum::Mandelbrot(mandelbrot))
+                }
             }
         }
     }

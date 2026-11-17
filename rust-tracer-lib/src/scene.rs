@@ -153,6 +153,9 @@ fn build_textured<G: Geometry + Send + Sync + 'static>(
         TextureEnum::Image(image) => {
             build_hittable(Object::new(object.geometry, object.material, image))
         }
+        TextureEnum::Mandelbrot(mandelbrot) => {
+            build_hittable(Object::new(object.geometry, object.material, mandelbrot))
+        }
     }
 }
 
